@@ -1,0 +1,13 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // 🛡️ REGLAS DE MANTENIMIENTO / DESARROLLO
+    // ADVERTENCIA: Estas reglas permiten lectura y escritura TOTAL sin restricciones.
+    // Solo usar para tareas de Seed Inicial o depuración masiva.
+    
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}

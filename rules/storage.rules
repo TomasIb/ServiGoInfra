@@ -1,0 +1,33 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    // Auth helper
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Services folder: Anyone can read, only authenticated users can upload
+    match /services/{fileName} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Profile pictures folder: Anyone can read, only the user can upload/delete
+    match /users/{userId}/{allPaths=**} {
+      allow read: if true;
+      allow write: if isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Chats folder: Only participants can access
+    // This assumes the file path includes the bookingId
+    match /chats/{bookingId}/{allPaths=**} {
+      allow read, write: if isAuthenticated(); // For more security, we could fetch firestore room data
+    }
+
+    // Default: Deny all
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
