@@ -28,20 +28,91 @@ const now = () => Timestamp.now()
 // Format: https://images.unsplash.com/photo-{ID}?w=200&h=200&fit=crop&q=80
 const UNSPLASH_BASE = (id) => `https://images.unsplash.com/photo-${id}?w=200&h=200&fit=crop&q=80`
 
-// ── Service category images (w=800&h=600&fit=crop)
-const CATEGORY_IMG = {
-  Limpieza:     'https://images.unsplash.com/photo-1581578731548-c64695cc6952?w=800&h=600&fit=crop&q=80',
-  Plomería:     'https://images.unsplash.com/photo-1607472586893-edb57bdc0e39?w=800&h=600&fit=crop&q=80',
-  Electricista: 'https://images.unsplash.com/photo-1621905251918-48416bd8575a?w=800&h=600&fit=crop&q=80',
-  Belleza:      'https://images.unsplash.com/photo-1560869713-7d0a29430803?w=800&h=600&fit=crop&q=80',
-  Tecnología:   'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=800&h=600&fit=crop&q=80',
-  Mudanza:      'https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=800&h=600&fit=crop&q=80',
-  Jardinería:   'https://images.unsplash.com/photo-1416879595882-3373a0480b5b?w=800&h=600&fit=crop&q=80',
-  Educación:    'https://images.unsplash.com/photo-1503676260728-1c00da094a0b?w=800&h=600&fit=crop&q=80',
-  Hogar:        'https://images.unsplash.com/photo-1504307651254-35680f356dfd?w=800&h=600&fit=crop&q=80',
-  Eventos:      'https://images.unsplash.com/photo-1492684223066-81342ee5ff30?w=800&h=600&fit=crop&q=80',
-  Tutoría:      'https://images.unsplash.com/photo-1571260899304-425eee4c7efc?w=800&h=600&fit=crop&q=80',
-  Otros:        'https://images.unsplash.com/photo-1521737852567-6949f3f9f2b5?w=800&h=600&fit=crop&q=80',
+// ── Service category images with gallery variations (w=800&h=600&fit=crop)
+const CATEGORY_IMAGES = {
+  Limpieza: [
+    'https://images.unsplash.com/photo-1581578731548-c64695cc6952?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1527482797697-8795b1a55a45?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1559027615-cd6628902046?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1585771724684-38269d6639fd?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1554456236-dfe8a90dd0e1?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1527482797697-8795b1a55a45?w=800&h=600&fit=crop&q=80',
+  ],
+  Plomería: [
+    'https://images.unsplash.com/photo-1607472586893-edb57bdc0e39?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1585932917720-97d4de0fbc64?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1581578731548-c64695cc6952?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1557679143-2cd3143131e3?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1564544747022-2b63fb3ce22d?w=800&h=600&fit=crop&q=80',
+  ],
+  Electricista: [
+    'https://images.unsplash.com/photo-1621905251918-48416bd8575a?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1555097462-c2dfc2c45f60?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1568814532159-adf8b842c7c5?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1573166675220-53be94e5a228?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1517420879443-b06a30ee0c12?w=800&h=600&fit=crop&q=80',
+  ],
+  Belleza: [
+    'https://images.unsplash.com/photo-1560869713-7d0a29430803?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1535632066927-ab7c9ab60908?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1552083974-5fefe8c9ef14?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1487412720507-e21cc028cb29?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1503250772935-731ae3b08e8f?w=800&h=600&fit=crop&q=80',
+  ],
+  Tecnología: [
+    'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1517433456452-f06b0073d5ac?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1531492746076-161ca9bcad58?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1497215842964-e6b87a915474?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1504384308090-c894fdcc538d?w=800&h=600&fit=crop&q=80',
+  ],
+  Mudanza: [
+    'https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1531482615713-2afd69097998?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1552088113-3ba5c5f39dda?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=800&h=600&fit=crop&q=80',
+  ],
+  Jardinería: [
+    'https://images.unsplash.com/photo-1416879595882-3373a0480b5b?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1416879595882-3373a0480b5b?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1472241324340-7952121482a2?w=800&h=600&fit=crop&q=80',
+  ],
+  Educación: [
+    'https://images.unsplash.com/photo-1503676260728-1c00da094a0b?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1427504494785-405a60e2e7d0?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1454165804606-c3d57bc86b40?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1519389950473-47ba0277781c?w=800&h=600&fit=crop&q=80',
+  ],
+  Hogar: [
+    'https://images.unsplash.com/photo-1504307651254-35680f356dfd?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1522708323590-d24dbb6b0267?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1556228578-8c89e6adf883?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1565183938294-7563f3ff68e5?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1573876677-b77f0546cad1?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1506439773649-6e0eb8cfb237?w=800&h=600&fit=crop&q=80',
+  ],
+  Eventos: [
+    'https://images.unsplash.com/photo-1492684223066-81342ee5ff30?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1519671482749-fd09be7ccebf?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1511632765486-a01980e01a18?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1533174072545-7c1a052cb830?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1462684691906-c0b45a87c7bf?w=800&h=600&fit=crop&q=80',
+  ],
+  Tutoría: [
+    'https://images.unsplash.com/photo-1571260899304-425eee4c7efc?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1427504494785-405a60e2e7d0?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1503676260728-1c00da094a0b?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1454165804606-c3d57bc86b40?w=800&h=600&fit=crop&q=80',
+  ],
+  Otros: [
+    'https://images.unsplash.com/photo-1521737852567-6949f3f9f2b5?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1552664730-d307ca884978?w=800&h=600&fit=crop&q=80',
+    'https://images.unsplash.com/photo-1504384308090-c894fdcc538d?w=800&h=600&fit=crop&q=80',
+  ],
 }
 
 // ── PROVIDERS (real Firebase Auth users) ──────────────────────
@@ -345,6 +416,11 @@ async function seed() {
       lastProviderIdx = s.providerIdx
     }
 
+    // Select 3-6 images from the category image set
+    const categoryImages = CATEGORY_IMAGES[s.category] || CATEGORY_IMAGES.Otros
+    const numImages = Math.min(3 + Math.floor(Math.random() * 4), categoryImages.length)
+    const selectedImages = categoryImages.slice(0, numImages)
+
     await setDoc(doc(db, 'services', serviceId), {
       title: s.title,
       category: s.category,
@@ -357,7 +433,7 @@ async function seed() {
       reviewCount: provider.reviewCount,
       activo: true,
       moderationStatus: 'approved',
-      images: [CATEGORY_IMG[s.category] || CATEGORY_IMG.Otros],
+      images: selectedImages,
       createdAt: daysAgo(Math.floor(Math.random() * 60) + 5),
       updatedAt: now(),
     })
