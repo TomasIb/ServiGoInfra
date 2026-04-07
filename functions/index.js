@@ -43,5 +43,9 @@ module.exports = {
     validateCoupon,
 
     // Advanced Payments (Escrow)
-    createEscrowPayment: require('./handlers/payments').createEscrowPayment
+    createEscrowPayment: require('./handlers/payments').createEscrowPayment,
+
+    // Agenda & Availability
+    icalFeed: require('./handlers/agenda').icalFeed,
+    autoReminder: require('./handlers/agenda').autoReminder,
 };
