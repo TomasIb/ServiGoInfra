@@ -67,10 +67,10 @@ class PaymentService {
     }
 
     /**
-     * PROFESSIONAL ESCROW: Direct Payment Creation.
+     * PAGO RETENIDO: Direct Payment Creation.
      * Use this with card tokens from the frontend.
      */
-    async createEscrowPayment(bookingId, amount, provider, paymentData) {
+    async createPagoRetenidoPayment(bookingId, amount, provider, paymentData) {
         if (!provider.mpAccessToken) {
             throw new Error('PROVIDER_NOT_LINKED_MP_OAUTH');
         }
@@ -79,7 +79,7 @@ class PaymentService {
 
         const body = {
             transaction_amount: Number(amount),
-            description: `ServiGo Escrow: Booking ${bookingId}`,
+            description: `ServiGo Pago Retenido: Booking ${bookingId}`,
             payment_method_id: paymentData.paymentMethodId,
             token: paymentData.token, // Card token from frontend
             installments: 1,
@@ -99,7 +99,7 @@ class PaymentService {
         await BookingRepository.update(bookingId, {
             paymentId: payment.id,
             paymentStatus: 'authorized', // Funds are pre-authorized (held)
-            escrowStatus: 'held',
+            retenidoStatus: 'held',
             captured: false
         });
 
@@ -107,7 +107,7 @@ class PaymentService {
     }
 
     /**
-     * ESCROW LIBERATION: Captures the pre-authorized payment.
+     * LIBERACIÓN DEL PAGO: Captures the pre-authorized payment.
      * Use when the service is accepted/completed.
      */
     async captureAndReleaseFunds(bookingId) {
@@ -121,15 +121,15 @@ class PaymentService {
         const { mpClient } = require('../config');
         const paymentClient = new Payment(mpClient);
 
-        console.log(`[Escrow] Capturing payment ${booking.paymentId} for booking ${bookingId}`);
+        console.log(`[Pago Retenido] Capturing payment ${booking.paymentId} for booking ${bookingId}`);
 
-        // This effectively completes the escrow: money is taken from client and distributed.
+        // This effectively completes the retenido: money is taken from client and distributed.
         const response = await paymentClient.capture({ id: booking.paymentId });
 
         if (response.status === 'approved') {
             await BookingRepository.update(bookingId, {
                 paymentStatus: 'approved',
-                escrowStatus: 'released',
+                retenidoStatus: 'released',
                 captured: true,
                 capturedAt: new Date(),
                 fundsReleased: true
@@ -146,29 +146,29 @@ class PaymentService {
     async updatePaymentStatusSync(bookingId, paymentData) {
         let appStatus = 'pending_payment';
         let isPaid = false;
-        let escrowStatus = 'none';
+        let retenidoStatus = 'none';
 
         const mpStatus = paymentData.status;
 
         if (mpStatus === 'authorized') {
             appStatus = 'payment_held';
             isPaid = true;
-            escrowStatus = 'held';
+            retenidoStatus = 'held';
         } else if (mpStatus === 'approved') {
             appStatus = 'confirmed';
             isPaid = true;
-            escrowStatus = 'released';
+            retenidoStatus = 'released';
         } else if (['rejected', 'cancelled', 'refunded'].includes(mpStatus)) {
             appStatus = 'payment_failed';
             isPaid = false;
-            escrowStatus = 'none';
+            retenidoStatus = 'none';
         }
 
         const updateData = {
             paymentStatus: mpStatus,
             status: appStatus,
             paid: isPaid,
-            escrowStatus: escrowStatus,
+            retenidoStatus: retenidoStatus,
             paymentId: paymentData.id,
             transactionAmount: paymentData.transaction_amount,
             paymentUpdatedAt: new Date(),

@@ -4,11 +4,11 @@ const { admin } = require('../config');
 
 /**
  * SERVICE LAYER: Orchestrates the Booking Lifecycle.
- * Implements Escrow and Status transition rules (ADR-001).
+ * Implements Pago Retenido and Status transition rules (ADR-001).
  */
 class BookingService {
     /**
-     * Updates booking status with security and escrow checks.
+     * Updates booking status with security and retenido checks.
      */
     async updateStatus(bookingId, newStatus, uid, isClient, isProvider, message) {
         const booking = await BookingRepository.getById(bookingId);

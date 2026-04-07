@@ -31,7 +31,7 @@ class MercadoPagoService {
 
     /**
      * ADVANCED: Creates a payment directly via REST API.
-     * Required for 100% control over Escrow (capture: false).
+     * Required for 100% control over Pago Retenido (capture: false).
      */
     async createPayment(providerAccessToken, paymentData) {
         const providerMpClient = new MercadoPagoConfig({ accessToken: providerAccessToken });
