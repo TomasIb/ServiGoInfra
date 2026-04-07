@@ -12,13 +12,25 @@ class PaymentService {
      * @param {object} provider - The user object from Firestore.
      * @param {object} service - The service object from Firestore.
      */
-    async initiateSplitPayment(bookingId, amount, provider, service) {
+    async initiateSplitPayment(bookingId, amount, provider, service, options = {}) {
         if (!provider.mpAccessToken) {
             throw new Error('PROVIDER_NOT_LINKED_MP_OAUTH');
         }
 
         const marketplaceFee = Math.round(Number(amount) * 0.10); // 10% ServiGo Fee
-        
+        const webAppUrl = options.webAppUrl || process.env.WEB_APP_URL || '';
+
+        // Build back_urls: web URLs if webAppUrl provided, mobile deep links otherwise
+        const backUrls = webAppUrl ? {
+            success: `${webAppUrl}/client/bookings/${bookingId}?payment=success`,
+            failure: `${webAppUrl}/client/bookings/${bookingId}?payment=failure`,
+            pending: `${webAppUrl}/client/bookings/${bookingId}?payment=pending`,
+        } : {
+            success: 'servigo://payment/success',
+            failure: 'servigo://payment/failure',
+            pending: 'servigo://payment/pending',
+        };
+
         const preferenceData = {
             items: [{
                 id: service.id,
@@ -27,20 +39,12 @@ class PaymentService {
                 currency_id: 'CLP',
                 unit_price: Number(amount),
             }],
-            back_urls: {
-                success: 'servigo://payment/success',
-                failure: 'servigo://payment/failure',
-                pending: 'servigo://payment/pending',
-            },
+            back_urls: backUrls,
             auto_return: 'approved',
             external_reference: bookingId,
             marketplace_fee: marketplaceFee,
             binary_mode: true,
-            // ESCROW ACTIVATION: Pre-authorize only.
-            // Note: In Checkout Pro (Preference API), capture: false is sometimes ignored.
-            // If it remains 'True', we will migrate this to the 'Payment Bricks' or 'Payment API' 
-            // to have 100% control over the hold/release flow.
-            capture: false, 
+            capture: false,
             operation_type: 'regular_payment',
             marketplace_deferred_release: true,
         };

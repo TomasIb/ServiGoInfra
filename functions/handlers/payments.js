@@ -14,13 +14,13 @@ exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB',
 
     if (!context.auth) throw new functions.https.HttpsError('unauthenticated', 'SESSION_NOT_RECOGNIZED_BY_SERVER');
 
-    const { bookingId, amount, serviceId } = data;
+    const { bookingId, amount, serviceId, webAppUrl } = data;
 
     try {
         // 1. Resolve domain objects (Service is the brain)
         const serviceDoc = await db.collection('services').doc(serviceId).get();
         if (!serviceDoc.exists) throw new functions.https.HttpsError('not-found', 'Servicio no encontrado');
-        
+
         const serviceData = { id: serviceDoc.id, ...serviceDoc.data() };
         const providerId = serviceData.providerId;
 
@@ -29,10 +29,11 @@ exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB',
 
         // 2. Delegate to the Service Layer
         const result = await PaymentService.initiateSplitPayment(
-            bookingId, 
-            amount, 
-            { id: providerDoc.id, ...providerDoc.data() }, 
-            serviceData
+            bookingId,
+            amount,
+            { id: providerDoc.id, ...providerDoc.data() },
+            serviceData,
+            { webAppUrl: webAppUrl || '' }
         );
 
         return { success: true, initPoint: result.initPoint, preferenceId: result.preferenceId };
@@ -289,11 +290,16 @@ async function sendPaymentNotifications(bookingId, bookingData, status) {
 exports.oauthMercadoPago = functions.runWith({ maxInstances: 1, memory: '128MB', timeoutSeconds: 30 }).https.onRequest(async (req, res) => {
     return cors(req, res, async () => {
         const code = req.query.code;
-        const state = req.query.state; // Este es el Provider ID (uid)
+        const rawState = req.query.state; // Format: "uid" or "uid|https://app.servigo.cl"
 
-        if (!code || !state) {
+        if (!code || !rawState) {
             return res.status(400).send('Código de autorización o estado (state) faltante.');
         }
+
+        // Parse state: supports "uid|redirectBase" format for web, plain "uid" for mobile
+        const stateParts = rawState.split('|');
+        const providerId = stateParts[0];
+        const webRedirectBase = stateParts[1] || null;
 
         try {
             const projectId = admin.instanceId ? admin.app().options.projectId : (process.env.GCLOUD_PROJECT || 'pruebaapp-11b43');
@@ -317,9 +323,9 @@ exports.oauthMercadoPago = functions.runWith({ maxInstances: 1, memory: '128MB',
             const result = await response.json();
 
             if (result.access_token) {
-                console.log(`[OAuth] Vinculación exitosa para ProviderID=${state}, MP_Collector=${result.user_id}`);
+                console.log(`[OAuth] Vinculación exitosa para ProviderID=${providerId}, MP_Collector=${result.user_id}`);
 
-                await db.collection('users').doc(state).update({
+                await db.collection('users').doc(providerId).update({
                     mpAccessToken: result.access_token,
                     mpRefreshToken: result.refresh_token,
                     mpPublicKey: result.public_key,
@@ -327,15 +333,27 @@ exports.oauthMercadoPago = functions.runWith({ maxInstances: 1, memory: '128MB',
                     mpLinkedAt: admin.firestore.FieldValue.serverTimestamp()
                 });
 
-                // Redirigir de vuelta a la app
-                res.redirect(`servigo://settings/payment?success=true`);
+                // Redirect back: web URL if provided, mobile deep link otherwise
+                if (webRedirectBase) {
+                    res.redirect(`${webRedirectBase}/provider/profile?mp_linked=true`);
+                } else {
+                    res.redirect(`servigo://settings/payment?success=true`);
+                }
             } else {
-                console.error(`[OAuth] Error en intercambio de tokens para ProviderID=${state}`, result);
-                res.redirect(`servigo://settings/payment?success=false&error=exchange_failed`);
+                console.error(`[OAuth] Error en intercambio de tokens para ProviderID=${providerId}`, result);
+                if (webRedirectBase) {
+                    res.redirect(`${webRedirectBase}/provider/profile?mp_linked=false&error=exchange_failed`);
+                } else {
+                    res.redirect(`servigo://settings/payment?success=false&error=exchange_failed`);
+                }
             }
         } catch (error) {
-            console.error(`[OAuth] Error crítico en servidor para ProviderID=${state}`, error);
-            res.redirect(`servigo://settings/payment?success=false&error=server_error`);
+            console.error(`[OAuth] Error crítico en servidor para ProviderID=${providerId}`, error);
+            if (webRedirectBase) {
+                res.redirect(`${webRedirectBase}/provider/profile?mp_linked=false&error=server_error`);
+            } else {
+                res.redirect(`servigo://settings/payment?success=false&error=server_error`);
+            }
         }
     });
 });
@@ -665,13 +683,16 @@ exports.resolveDispute = functions.runWith({ maxInstances: 1, memory: '256MB', t
  * con más de 7 días sin respuesta del cliente → auto-aprueba y libera fondos.
  */
 exports.autoApproveCompletedBookings = functions.runWith({ memory: '256MB', timeoutSeconds: 120 })
-    .pubsub.schedule('every 6 hours').onRun(async () => {
-        const sevenDaysAgo = new Date();
-        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
-        functions.logger.info(`[AutoApprove] Buscando bookings pendientes de aprobación desde antes de ${sevenDaysAgo.toISOString()}`);
+    .pubsub.schedule('every 1 hours').onRun(async () => {
+        functions.logger.info(`[AutoApprove] Checking bookings for category-based auto-release...`);
 
         try {
+            // Load category-based release windows from config
+            const escrowDoc = await db.collection('configurations').doc('escrow').get();
+            const escrowConfig = escrowDoc.exists ? escrowDoc.data() : {};
+            const releaseWindows = escrowConfig.releaseWindows || {};
+            const defaultWindowHours = escrowConfig.defaultWindow || 72;
+
             const snapshot = await db.collection('bookings')
                 .where('status', '==', 'completed_pending_release')
                 .where('fundsReleased', '!=', true)
@@ -681,24 +702,36 @@ exports.autoApproveCompletedBookings = functions.runWith({ memory: '256MB', time
 
             for (const doc of snapshot.docs) {
                 const booking = doc.data();
-                
-                // Verificar que tenga más de 7 días en este estado
-                const lastUpdate = booking.fundsReleasedAt?.toDate?.() 
+
+                // Determine the release window for this booking's category
+                const category = booking.serviceCat || booking.serviceCategory || '';
+                const windowHours = releaseWindows[category] || defaultWindowHours;
+                const windowMs = windowHours * 3600000;
+
+                // Find the timestamp when the booking entered completed_pending_release
+                const enteredAt = booking.workerCompletedAt?.toDate?.()
                     || booking.statusHistory?.slice(-1)[0]?.timestamp?.toDate?.()
+                    || booking.updatedAt?.toDate?.()
                     || booking.paymentCreatedAt?.toDate?.();
 
-                if (!lastUpdate || lastUpdate > sevenDaysAgo) continue;
+                if (!enteredAt) continue;
 
-                functions.logger.info(`[AutoApprove] Auto-aprobando Booking=${doc.id} (${Math.round((Date.now() - lastUpdate.getTime()) / 86400000)} días sin respuesta)`);
+                const elapsed = Date.now() - enteredAt.getTime();
+                if (elapsed < windowMs) continue;
+
+                const elapsedHours = Math.round(elapsed / 3600000);
+                functions.logger.info(`[AutoApprove] Auto-releasing Booking=${doc.id} (${elapsedHours}h elapsed, window=${windowHours}h, category=${category})`);
 
                 await doc.ref.update({
                     status: 'completed',
                     fundsReleased: true,
                     fundsReleasedAt: admin.firestore.FieldValue.serverTimestamp(),
                     autoApproved: true,
+                    autoApproveWindowHours: windowHours,
+                    completedAt: admin.firestore.FieldValue.serverTimestamp(),
                     statusHistory: admin.firestore.FieldValue.arrayUnion({
                         status: 'auto_approved',
-                        message: '✅ Servicio auto-aprobado (7 días sin respuesta del cliente). Fondos liberados.',
+                        message: `Servicio auto-aprobado (${windowHours}h sin respuesta del cliente). Fondos liberados.`,
                         timestamp: admin.firestore.Timestamp.now(),
                         userRole: 'system',
                         uid: 'auto_approve_engine'
@@ -712,17 +745,30 @@ exports.autoApproveCompletedBookings = functions.runWith({ memory: '256MB', time
                     if (pushToken && Expo.isExpoPushToken(pushToken)) {
                         await expo.sendPushNotificationsAsync([{
                             to: pushToken,
-                            title: '✅ Servicio Auto-Aprobado',
+                            title: 'Servicio Auto-Aprobado',
                             body: `Tu servicio fue aprobado automáticamente. El pago está en camino.`,
                             data: { bookingId: doc.id, type: 'auto_approve' }
                         }]);
                     }
                 }
 
+                // Notificar al cliente
+                if (booking.clientId) {
+                    await db.collection('notifications').add({
+                        userId: booking.clientId,
+                        title: 'Servicio confirmado automáticamente',
+                        body: `Tu reserva de "${booking.serviceTitle}" fue confirmada automáticamente. El pago fue liberado al proveedor.`,
+                        read: false,
+                        type: 'auto_approve',
+                        bookingId: doc.id,
+                        createdAt: admin.firestore.FieldValue.serverTimestamp()
+                    });
+                }
+
                 autoApprovedCount++;
             }
 
-            functions.logger.info(`[AutoApprove] Proceso completado. ${autoApprovedCount} bookings auto-aprobados.`);
+            functions.logger.info(`[AutoApprove] Done. ${autoApprovedCount} bookings auto-released.`);
             return null;
         } catch (error) {
             functions.logger.error(`[AutoApprove] Error:`, error);

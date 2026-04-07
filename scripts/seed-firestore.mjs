@@ -5,6 +5,7 @@
 import { initializeApp } from 'firebase/app'
 import { getFirestore, collection, doc, setDoc, Timestamp } from 'firebase/firestore'
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword } from 'firebase/auth'
+import { randomUUID } from 'crypto'
 
 const firebaseConfig = {
   apiKey: 'AIzaSyDGnx_dJE1UuHoUlNljLZoakVTgp_f-roo',
@@ -23,6 +24,26 @@ const auth = getAuth(app)
 const daysAgo = (n) => Timestamp.fromDate(new Date(Date.now() - n * 86400000))
 const now = () => Timestamp.now()
 
+// ── Stable Unsplash portrait photos per person (w=200&h=200&fit=crop)
+// Format: https://images.unsplash.com/photo-{ID}?w=200&h=200&fit=crop&q=80
+const UNSPLASH_BASE = (id) => `https://images.unsplash.com/photo-${id}?w=200&h=200&fit=crop&q=80`
+
+// ── Service category images (w=800&h=600&fit=crop)
+const CATEGORY_IMG = {
+  Limpieza:     'https://images.unsplash.com/photo-1581578731548-c64695cc6952?w=800&h=600&fit=crop&q=80',
+  Plomería:     'https://images.unsplash.com/photo-1607472586893-edb57bdc0e39?w=800&h=600&fit=crop&q=80',
+  Electricista: 'https://images.unsplash.com/photo-1621905251918-48416bd8575a?w=800&h=600&fit=crop&q=80',
+  Belleza:      'https://images.unsplash.com/photo-1560869713-7d0a29430803?w=800&h=600&fit=crop&q=80',
+  Tecnología:   'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=800&h=600&fit=crop&q=80',
+  Mudanza:      'https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=800&h=600&fit=crop&q=80',
+  Jardinería:   'https://images.unsplash.com/photo-1416879595882-3373a0480b5b?w=800&h=600&fit=crop&q=80',
+  Educación:    'https://images.unsplash.com/photo-1503676260728-1c00da094a0b?w=800&h=600&fit=crop&q=80',
+  Hogar:        'https://images.unsplash.com/photo-1504307651254-35680f356dfd?w=800&h=600&fit=crop&q=80',
+  Eventos:      'https://images.unsplash.com/photo-1492684223066-81342ee5ff30?w=800&h=600&fit=crop&q=80',
+  Tutoría:      'https://images.unsplash.com/photo-1571260899304-425eee4c7efc?w=800&h=600&fit=crop&q=80',
+  Otros:        'https://images.unsplash.com/photo-1521737852567-6949f3f9f2b5?w=800&h=600&fit=crop&q=80',
+}
+
 // ── PROVIDERS (real Firebase Auth users) ──────────────────────
 const PROVIDERS = [
   {
@@ -35,7 +56,7 @@ const PROVIDERS = [
     isVerified: true,
     rating: 4.9,
     reviewCount: 47,
-    photoURL: null,
+    photoURL: UNSPLASH_BASE('1494790108377-be9c29b29330'),
   },
   {
     email: 'juan.perez@servigo.cl',
@@ -47,7 +68,7 @@ const PROVIDERS = [
     isVerified: true,
     rating: 4.7,
     reviewCount: 28,
-    photoURL: null,
+    photoURL: UNSPLASH_BASE('1500648767791-00dcc994a43e'),
   },
   {
     email: 'pedro.rojas@servigo.cl',
@@ -59,7 +80,7 @@ const PROVIDERS = [
     isVerified: true,
     rating: 4.9,
     reviewCount: 65,
-    photoURL: null,
+    photoURL: UNSPLASH_BASE('1507003211169-0a1dd7228f2d'),
   },
   {
     email: 'ana.lopez@servigo.cl',
@@ -71,7 +92,7 @@ const PROVIDERS = [
     isVerified: true,
     rating: 4.6,
     reviewCount: 19,
-    photoURL: null,
+    photoURL: UNSPLASH_BASE('1534528741775-53994a69daeb'),
   },
   {
     email: 'carlos.martinez@servigo.cl',
@@ -83,7 +104,7 @@ const PROVIDERS = [
     isVerified: true,
     rating: 4.5,
     reviewCount: 31,
-    photoURL: null,
+    photoURL: UNSPLASH_BASE('1506794778202-cad84cf45f1d'),
   },
   {
     email: 'transportes.zurita@servigo.cl',
@@ -95,7 +116,7 @@ const PROVIDERS = [
     isVerified: true,
     rating: 4.8,
     reviewCount: 23,
-    photoURL: null,
+    photoURL: UNSPLASH_BASE('1560250097-0b93528c311a'),
   },
   {
     email: 'roberto.fuentes@servigo.cl',
@@ -107,7 +128,7 @@ const PROVIDERS = [
     isVerified: true,
     rating: 4.7,
     reviewCount: 15,
-    photoURL: null,
+    photoURL: UNSPLASH_BASE('1472099645785-5658abf4ff4e'),
   },
   {
     email: 'prof.silva@servigo.cl',
@@ -119,7 +140,7 @@ const PROVIDERS = [
     isVerified: true,
     rating: 4.9,
     reviewCount: 78,
-    photoURL: null,
+    photoURL: UNSPLASH_BASE('1519345182560-3f2917c472ef'),
   },
   {
     email: 'luis.araya@servigo.cl',
@@ -131,7 +152,7 @@ const PROVIDERS = [
     isVerified: true,
     rating: 4.6,
     reviewCount: 12,
-    photoURL: null,
+    photoURL: UNSPLASH_BASE('1463453091185-61582044d556'),
   },
   {
     email: 'dj.carlos@servigo.cl',
@@ -143,7 +164,7 @@ const PROVIDERS = [
     isVerified: true,
     rating: 4.8,
     reviewCount: 34,
-    photoURL: null,
+    photoURL: UNSPLASH_BASE('1545167622-3a6ac756afa4'),
   },
   {
     email: 'teacher.mike@servigo.cl',
@@ -155,7 +176,7 @@ const PROVIDERS = [
     isVerified: true,
     rating: 4.9,
     reviewCount: 56,
-    photoURL: null,
+    photoURL: UNSPLASH_BASE('1552058544-f2b08422138a'),
   },
   {
     email: 'tecnoserv@servigo.cl',
@@ -167,7 +188,7 @@ const PROVIDERS = [
     isVerified: true,
     rating: 4.5,
     reviewCount: 41,
-    photoURL: null,
+    photoURL: UNSPLASH_BASE('1568602471122-7832951cc4c5'),
   },
 ]
 
@@ -183,6 +204,7 @@ const CLIENTS = [
     isVerified: true,
     rating: 0,
     reviewCount: 0,
+    photoURL: UNSPLASH_BASE('1438761681033-6461ffad8d80'),
   },
   {
     email: 'carlos.mendez@gmail.com',
@@ -194,6 +216,7 @@ const CLIENTS = [
     isVerified: true,
     rating: 0,
     reviewCount: 0,
+    photoURL: UNSPLASH_BASE('1548372290-8d01b6c8e78c'),
   },
   {
     email: 'ana.reyes@gmail.com',
@@ -205,6 +228,7 @@ const CLIENTS = [
     isVerified: false,
     rating: 0,
     reviewCount: 0,
+    photoURL: UNSPLASH_BASE('1567532939604-b6b5b0db2604'),
   },
 ]
 
@@ -249,7 +273,6 @@ async function writeUserDoc(uid, userData) {
     ...data,
     uid,
     banned: false,
-    photoURL: null,
     createdAt: daysAgo(Math.floor(Math.random() * 90) + 30),
   }, { merge: true })
 }
@@ -314,7 +337,7 @@ async function seed() {
   for (let i = 0; i < SERVICES.length; i++) {
     const s = SERVICES[i]
     const provider = providerUids[s.providerIdx]
-    const serviceId = `svc_${String(i + 1).padStart(3, '0')}`
+    const serviceId = randomUUID()
 
     // Sign in as the provider to have write permissions
     if (s.providerIdx !== lastProviderIdx) {
@@ -334,7 +357,7 @@ async function seed() {
       reviewCount: provider.reviewCount,
       activo: true,
       moderationStatus: 'approved',
-      images: [],
+      images: [CATEGORY_IMG[s.category] || CATEGORY_IMG.Otros],
       createdAt: daysAgo(Math.floor(Math.random() * 60) + 5),
       updatedAt: now(),
     })
@@ -361,12 +384,13 @@ async function seed() {
     { serviceIdx: 15, clientIdx: 2, status: 'completed', daysAgoScheduled: 12, daysAgoCreated: 16 },
   ]
 
+  const bookingIds = []
   let lastClientIdx = -1
   for (let i = 0; i < bookings.length; i++) {
     const b = bookings[i]
     const service = serviceIds[b.serviceIdx]
     const client = clientUids[b.clientIdx]
-    const bookingId = `bk_${String(i + 1).padStart(3, '0')}`
+    const bookingId = randomUUID()
 
     // Sign in as the client to have write permissions
     if (b.clientIdx !== lastClientIdx) {
@@ -395,6 +419,7 @@ async function seed() {
       updatedAt: now(),
       ...(b.status === 'completed' ? { completedAt: daysAgo(b.daysAgoScheduled - 1) } : {}),
     })
+    bookingIds.push(bookingId)
     console.log(`  ✓ Booking: ${service.title} → ${client.displayName} [${b.status}]`)
   }
 
@@ -410,6 +435,20 @@ async function seed() {
     'Gran profesional, muy amable y eficiente. Precio justo por la calidad.',
   ]
 
+  const SEED_WORKER = {
+    email: 'seed_worker@servigo.cl',
+    password: 'servigo123',
+    role: 'admin',
+    displayName: 'Seed Worker Admin',
+  };
+  const seedUid = await createOrSignIn(SEED_WORKER);
+  if (seedUid) {
+    await writeUserDoc(seedUid, SEED_WORKER);
+  }
+
+  // Sign in as Admin once to overwrite existing reviews safely using catch-all rule
+  await signInWithEmailAndPassword(auth, SEED_WORKER.email, SEED_WORKER.password);
+
   for (let i = 0; i < completedBookings.length; i++) {
     const b = completedBookings[i]
     const service = serviceIds[b.serviceIdx]
@@ -417,21 +456,41 @@ async function seed() {
     const reviewId = `rev_${String(i + 1).padStart(3, '0')}`
     const rating = 4 + Math.random() * 1
 
-    // Sign in as the client who wrote the review
-    await signInWithEmailAndPassword(auth, client.email, CLIENTS[b.clientIdx].password)
-
+    const bookingIdx = bookings.indexOf(b)
     await setDoc(doc(db, 'reviews', reviewId), {
       serviceId: service.id,
       providerId: service.providerId,
       clientId: client.uid,
       clientName: client.displayName,
-      bookingId: `bk_${String(bookings.indexOf(b) + 1).padStart(3, '0')}`,
+      bookingId: bookingIds[bookingIdx],
       rating: Math.round(rating * 10) / 10,
       comment: reviewTexts[i % reviewTexts.length],
       createdAt: daysAgo(b.daysAgoScheduled - 2),
     })
     console.log(`  ✓ Review: ${client.displayName} → ${service.title} (${rating.toFixed(1)}⭐)`)
   }
+
+  // 7. Seed escrow configuration
+  console.log('\n── Seeding Escrow Configuration ──')
+  await setDoc(doc(db, 'configurations', 'escrow'), {
+    releaseWindows: {
+      Limpieza: 24,
+      Belleza: 24,
+      Plomería: 72,
+      Electricista: 72,
+      Tecnología: 72,
+      Mudanza: 72,
+      Jardinería: 72,
+      Hogar: 120,
+      Eventos: 120,
+      Educación: 120,
+      Tutoría: 120,
+      Otros: 120,
+    },
+    defaultWindow: 72,
+    updatedAt: Timestamp.now(),
+  })
+  console.log('  ✓ configurations/escrow seeded')
 
   console.log('\n✅ Seed complete!')
   console.log('\n── Login Credentials ──')

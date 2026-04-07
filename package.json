@@ -1,0 +1,27 @@
+{
+  "name": "servigoinfra",
+  "version": "1.0.0",
+  "description": "Central Firebase infrastructure for the ServiGo platform. This repo manages all shared backend services consumed by both the mobile app (ServiGo) and web app (ServiGoWebApp).",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TomasIb/ServiGoInfra.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/TomasIb/ServiGoInfra/issues"
+  },
+  "homepage": "https://github.com/TomasIb/ServiGoInfra#readme",
+  "dependencies": {
+    "firebase": "^12.11.0"
+  }
+}
