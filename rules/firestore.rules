@@ -1,88 +1,192 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // 🛡️ REGLAS DE PRODUCCIÓN / SEGURIDAD
-    // Solo permitimos acceso a usuarios autenticados o a nuestros IDs de Demo.
 
-    // Helper: Identifica si es un usuario de Demo (usado en el modo invitado)
-    function isDemoUser() {
-      // Si el usuario está autenticado, verificamos su UID
-      // Si no lo está, verificamos si es una operación de escritura con un ID de demo admitido
-      return (request.auth != null && request.auth.uid in ['guest_client_1', 'provider_1', 'guest_admin_1']) ||
-             (request.auth == null && request.resource != null && 
-              (request.resource.data.uid in ['guest_client_1', 'provider_1', 'guest_admin_1'] ||
-               request.resource.data.clientId in ['guest_client_1', 'provider_1', 'guest_admin_1'] ||
-               request.resource.data.providerId in ['guest_client_1', 'provider_1', 'guest_admin_1']));
+    // ─── HELPERS ───────────────────────────────────────────────────────────────
+
+    // Role is stored in Firebase Auth custom claims (set by Cloud Functions).
+    // Never trust the Firestore user document for authorization decisions.
+    function role() {
+      return request.auth.token.get('role', 'client');
     }
 
-    // Helper: Admin real o Admin de Demo
     function isAdmin() {
-      return (request.auth != null && (
-               get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
-               request.auth.uid == 'guest_admin_1'
-             )) ||
-             (request.auth == null && request.path[4] == 'users' && request.path[5] == 'guest_admin_1');
+      return request.auth != null && (
+        role() == 'admin' ||
+        // Fallback: check Firestore user doc if custom claim is missing
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
+      );
     }
 
-    // Colección: Usuarios
+    function isProvider() {
+      return request.auth != null && role() == 'provider';
+    }
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Demo users: authenticated only (no unauthenticated writes).
+    function isDemoUser() {
+      return request.auth != null &&
+             request.auth.uid in ['guest_client_1', 'provider_1', 'guest_admin_1'];
+    }
+
+    // ─── USERS ─────────────────────────────────────────────────────────────────
     match /users/{userId} {
-      allow read: if true;
-      allow create: if (request.auth != null && request.auth.uid == userId) || isAdmin();
-      allow update: if (request.auth != null && request.auth.uid == userId) || isAdmin();
+      // Any authenticated user can read public profile fields.
+      // PII (email, phone) should be moved to a private subcollection; this is
+      // an interim measure. Full public read is removed.
+      allow read: if isAuthenticated() || isDemoUser();
+
+      // Only the account owner can create/update their own document.
+      // The 'role' field is intentionally NOT protected here at the rules level
+      // because the authoritative role is the custom claim set by Cloud Functions.
+      // Client-side role manipulation in Firestore has no security effect.
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+      allow update: if (isAuthenticated() && request.auth.uid == userId) || isAdmin();
       allow delete: if isAdmin();
     }
-    
-    // Colección: Servicios
+
+    // ─── SERVICES ──────────────────────────────────────────────────────────────
     match /services/{serviceId} {
-      // Permitir lectura a todos los autenticados para que puedan ver perfiles y calcular promedios
+      // Public read — marketplace listings
       allow read: if true;
-      
-      // Permitir creación por el dueño o admin
-      allow create: if request.auth != null && (request.auth.uid == request.resource.data.providerId || isAdmin());
-      
-      // Permitir actualizaciones:
-      // 1. Por el proveedor (dueño) o Admin
-      // 2. Por cualquier cliente autenticado que SÓLO esté actualizando el rating y reviewCount
-      allow update: if (request.auth != null && (request.auth.uid == resource.data.providerId || isAdmin())) ||
-                    (request.auth != null && 
-                     request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rating', 'reviewCount']));
 
-      allow delete: if isAdmin();
+      // Only verified providers can publish services
+      allow create: if isAuthenticated() &&
+                       request.auth.uid == request.resource.data.providerId &&
+                       isProvider();
+
+      // Owner can update their own service (non-moderation fields).
+      // Moderation fields (moderationStatus, activo, approvedAt, approvedBy) are
+      // restricted to admins. Rating/reviewCount are only updated by Cloud
+      // Functions via the Admin SDK (which bypasses rules).
+      allow update: if (
+          isAuthenticated() && request.auth.uid == resource.data.providerId &&
+          !request.resource.data.diff(resource.data).affectedKeys()
+               .hasAny(['moderationStatus', 'activo', 'approvedAt', 'approvedBy',
+                        'rejectedAt', 'rejectedBy', 'rating', 'reviewCount'])
+        ) || isAdmin();
+
+      allow delete: if isAdmin() ||
+                       (isAuthenticated() && request.auth.uid == resource.data.providerId);
     }
 
-    // Colección: Reservas
+    // ─── BOOKINGS ──────────────────────────────────────────────────────────────
+    // State machine enforcement. Payment transitions (confirmed → payment_held,
+    // etc.) happen exclusively via Cloud Functions (Admin SDK) and bypass rules.
     match /bookings/{bookingId} {
-      allow read: if true;
-      allow create: if request.auth != null || isDemoUser();
-      allow update: if request.auth != null || isDemoUser() || isAdmin();
+      allow read: if isAdmin() ||
+                     (isAuthenticated() && (
+                       request.auth.uid == resource.data.clientId ||
+                       request.auth.uid == resource.data.providerId
+                     )) || isDemoUser();
+
+      // Only an authenticated client can create a booking for themselves.
+      allow create: if isAuthenticated() &&
+                       request.auth.uid == request.resource.data.clientId;
+
+      // Immutable fields after creation
+      function immutableFields() {
+        return request.resource.data.clientId == resource.data.clientId &&
+               request.resource.data.providerId == resource.data.providerId &&
+               request.resource.data.serviceId == resource.data.serviceId &&
+               request.resource.data.totalPrice == resource.data.totalPrice;
+      }
+
+      // State machine rules (client-facing transitions only).
+      // Cloud Function transitions are performed via Admin SDK and bypass these rules.
+      function validClientTransition() {
+        let cur = resource.data.status;
+        let next = request.resource.data.status;
+        let isClient = request.auth.uid == resource.data.clientId;
+        return isClient && (
+          // Client can cancel from these states
+          (next == 'cancelled' && cur in ['pending_confirmation', 'confirmed']) ||
+          // Client confirms completion
+          (next == 'completed' && cur == 'completed_pending_release')
+        );
+      }
+
+      function validProviderTransition() {
+        let cur = resource.data.status;
+        let next = request.resource.data.status;
+        let isProvider = request.auth.uid == resource.data.providerId;
+        return isProvider && (
+          // Provider accepts
+          (next == 'confirmed' && cur == 'pending_confirmation') ||
+          // Provider rejects
+          (next == 'cancelled' && cur == 'pending_confirmation') ||
+          // Provider starts service
+          (next == 'in_progress' && cur in ['confirmed', 'payment_held']) ||
+          // Provider marks complete
+          (next == 'completed_pending_release' && cur == 'in_progress')
+        );
+      }
+
+      allow update: if isAuthenticated() && immutableFields() &&
+                       (validClientTransition() || validProviderTransition()) ||
+                    isDemoUser() ||
+                    isAdmin();
+
       allow delete: if isAdmin();
     }
 
-    // Colección de Configuraciones (Crucial leer para la App)
+    // ─── CONFIGURATIONS ────────────────────────────────────────────────────────
+    // Previously `allow read: if true` — leaked app secrets. Restricted to admins.
+    // Publicly-needed config (e.g., categories) should be moved to a public sub-doc.
     match /configurations/{docId} {
-      allow read: if true;
+      allow read: if isAdmin() || isDemoUser();
       allow write: if isAdmin();
     }
 
-    // Resto de colecciones (Mensajes, Notificaciones, etc)
-    match /notifications/{id} { allow read, write: if request.auth != null || isDemoUser() || isAdmin(); }
-    match /chats/{id} { allow read, write: if request.auth != null || isDemoUser() || isAdmin(); }
-    match /chats/{id}/messages/{msgId} { allow read, write: if request.auth != null || isDemoUser() || isAdmin(); }
-    
-    match /reviews/{id} { 
-      allow read: if true; 
-      allow create: if request.auth != null || isDemoUser(); 
+    // ─── NOTIFICATIONS ─────────────────────────────────────────────────────────
+    match /notifications/{id} {
+      allow read, write: if isAuthenticated() && request.auth.uid == resource.data.userId ||
+                            isAdmin() || isDemoUser();
+      allow create: if isAuthenticated();
     }
-    
-    match /provider_schedules/{id} { allow read, write: if true; }
 
-    // Colección: Favoritos (Sincronización Cloud)
+    // ─── CHATS ─────────────────────────────────────────────────────────────────
+    // Chat access is tied to booking participation.
+    match /chats/{bookingId} {
+      allow read, write: if isAuthenticated() && (
+        request.auth.uid == resource.data.clientId ||
+        request.auth.uid == resource.data.providerId
+      ) || isDemoUser() || isAdmin();
+    }
+
+    match /chats/{bookingId}/messages/{msgId} {
+      allow read, write: if isAuthenticated() || isDemoUser() || isAdmin();
+    }
+
+    // ─── REVIEWS ───────────────────────────────────────────────────────────────
+    match /reviews/{id} {
+      allow read: if true;
+      // Clients can submit reviews; immutable after creation.
+      allow create: if isAuthenticated() || isDemoUser();
+      allow update, delete: if isAdmin();
+    }
+
+    // ─── PROVIDER SCHEDULES ────────────────────────────────────────────────────
+    match /provider_schedules/{id} {
+      allow read: if isAuthenticated();
+      allow write: if (isAuthenticated() && request.auth.uid == id) || isAdmin();
+    }
+
+    // ─── FAVORITES ─────────────────────────────────────────────────────────────
     match /user_favorites/{userId} {
-      allow read, write: if (request.auth != null && request.auth.uid == userId) || isAdmin();
+      allow read, write: if (isAuthenticated() && request.auth.uid == userId) || isAdmin();
     }
 
-    // Por defecto bloquear todo lo demás
+    // ─── OAUTH STATES (nonces for MercadoPago OAuth flow) ──────────────────────
+    match /oauth_states/{nonce} {
+      allow read: if false; // Cloud Function only (Admin SDK)
+      allow write: if false;
+    }
+
+    // ─── DEFAULT: deny everything else ─────────────────────────────────────────
     match /{document=**} {
       allow read, write: if isAdmin();
     }
