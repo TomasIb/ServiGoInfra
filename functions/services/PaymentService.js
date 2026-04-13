@@ -60,7 +60,8 @@ class PaymentService {
             paymentStatus: 'pending',
             collectorType: 'split_payment',
             servigoFee: marketplaceFee,
-            providerPayout: Number(amount) - marketplaceFee
+            providerPayout: Number(amount) - marketplaceFee,
+            retenidoStatus: 'none' // Initialize
         });
 
         return { initPoint: preference.initPoint, preferenceId: preference.id };

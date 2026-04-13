@@ -1,10 +1,10 @@
+const { functions, cors } = require('../config');
 const CouponService = require('../services/CouponService');
-const { cors } = require('../config');
 
 /**
  * Validates a coupon code and returns the discount amount.
  */
-exports.validateCoupon = async (req, res) => {
+exports.validateCoupon = functions.https.onRequest(async (req, res) => {
     return cors(req, res, async () => {
         try {
             const { code, amount, userId } = req.body;
@@ -25,4 +25,4 @@ exports.validateCoupon = async (req, res) => {
             res.status(400).send({ error: error.message });
         }
     });
-};
+});

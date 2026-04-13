@@ -33,9 +33,10 @@ exports.handleReviewCreated = functions.runWith({ maxInstances: 1, memory: '128M
  * USE WITH CAUTION: Iterates through all reviews
  */
 exports.recalculateAllRatings = functions.runWith({ timeoutSeconds: 120, memory: '256MB' }).https.onCall(async (data, context) => {
-    // Basic Admin Check (UID or Role in production)
-    const isAdmin = context.auth?.token?.admin === true || 
-                  ['guest_admin_1', '7XJIKfX0cQO49F7N4tByVshHpxX2'].includes(context.auth?.uid);
+    // Admin check via custom claim (set by Cloud Functions on user creation/role change).
+    // Never use hardcoded UIDs — they expose account identifiers in source code.
+    const isAdmin = context.auth?.token?.role === 'admin' ||
+                    context.auth?.uid === 'guest_admin_1'; // demo only
     
     if (!isAdmin) {
         throw new functions.https.HttpsError('permission-denied', 'Only admins can recalculate ratings.');

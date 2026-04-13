@@ -1,6 +1,7 @@
-const { functions, db, mpClient, cors, admin, expo } = require('../config');
+const { functions, db, mpClient, cors, admin, expo, mercadopagoClientId, mercadopagoClientSecret } = require('../config');
 const { Preference, Payment, MercadoPagoConfig } = require('mercadopago');
 const { Expo } = require('expo-server-sdk');
+const crypto = require('crypto');
 
 // LAYERED ARCHITECTURE IMPORTS (ADR-001)
 const PaymentService = require('../services/PaymentService');
@@ -14,24 +15,45 @@ exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB',
 
     if (!context.auth) throw new functions.https.HttpsError('unauthenticated', 'SESSION_NOT_RECOGNIZED_BY_SERVER');
 
-    const { bookingId, amount, serviceId, webAppUrl } = data;
+    const { bookingId, serviceId, webAppUrl } = data;
+    // NOTE: 'amount' from client is intentionally ignored. We read totalPrice
+    // from the booking document in Firestore to prevent price manipulation.
+
+    if (!bookingId || !serviceId) {
+        throw new functions.https.HttpsError('invalid-argument', 'Faltan parámetros: bookingId y serviceId son requeridos.');
+    }
 
     try {
+        // 0. Read authoritative amount from Firestore — never trust the client
+        const bookingDoc = await db.collection('bookings').doc(bookingId).get();
+        if (!bookingDoc.exists) throw new functions.https.HttpsError('not-found', 'Reserva no encontrada');
+        const bookingData = bookingDoc.data();
+
+        // Verify the caller is the client of this booking
+        if (bookingData.clientId !== context.auth.uid) {
+            throw new functions.https.HttpsError('permission-denied', 'No tienes permiso para pagar esta reserva.');
+        }
+
+        const amount = bookingData.totalPrice;
+        if (!amount || amount <= 0) {
+            throw new functions.https.HttpsError('failed-precondition', 'El monto de la reserva no es válido.');
+        }
+
         // 1. Resolve domain objects (Service is the brain)
         const serviceDoc = await db.collection('services').doc(serviceId).get();
         if (!serviceDoc.exists) throw new functions.https.HttpsError('not-found', 'Servicio no encontrado');
 
         const serviceData = { id: serviceDoc.id, ...serviceDoc.data() };
-        const providerId = serviceData.providerId;
 
-        const providerDoc = await db.collection('users').doc(providerId).get();
-        if (!providerDoc.exists) throw new functions.https.HttpsError('not-found', 'Proveedor no encontrado');
+        const providerDoc = await db.collection('users').doc(serviceData.providerId).get();
+        if (!providerDoc.exists) throw new functions.https.HttpsError('not-found', 'Profesional no encontrado');
+        const providerData = { id: providerDoc.id, ...providerDoc.data() };
 
-        // 2. Delegate to the Service Layer
+        // 2. Delegate to Service Layer
         const result = await PaymentService.initiateSplitPayment(
             bookingId,
             amount,
-            { id: providerDoc.id, ...providerDoc.data() },
+            providerData,
             serviceData,
             { webAppUrl: webAppUrl || '' }
         );
@@ -56,17 +78,33 @@ exports.processPayment = functions.runWith({ maxInstances: 1, memory: '256MB', t
 
     if (!context.auth) throw new functions.https.HttpsError('unauthenticated', 'Acceso denegado');
 
-    const { bookingId, token, payment_method_id, installments, issuer_id, amount, email } = data;
+    const { bookingId, token, payment_method_id, installments, issuer_id, email } = data;
+    // NOTE: 'amount' from client is intentionally ignored — we read from Firestore.
+
+    if (!bookingId || !token || !payment_method_id) {
+        throw new functions.https.HttpsError('invalid-argument', 'Faltan parámetros requeridos.');
+    }
 
     try {
         const bookingRef = db.collection('bookings').doc(bookingId);
         const bookingDoc = await bookingRef.get();
         if (!bookingDoc.exists) throw new Error('Reserva no encontrada');
 
-        const providerId = bookingDoc.data().providerId;
+        const bookingData = bookingDoc.data();
+
+        // Verify caller is the booking's client
+        if (bookingData.clientId !== context.auth.uid) {
+            throw new functions.https.HttpsError('permission-denied', 'No tienes permiso para pagar esta reserva.');
+        }
+
+        // Authoritative amount from Firestore
+        const amount = bookingData.totalPrice;
+        if (!amount || amount <= 0) throw new Error('Monto de reserva inválido');
+
+        const providerId = bookingData.providerId;
         const providerDoc = await db.collection('users').doc(providerId).get();
         const providerMpId = providerDoc.exists ? (providerDoc.data().mpCollectorId || providerDoc.data().mercadoPagoUserId) : null;
-        
+
         const marketPlaceFee = Math.round(Number(amount) * 0.10);
         const appId = process.env.MERCADOPAGO_CLIENT_ID || functions.config().mercadopago?.client_id;
         
@@ -120,6 +158,42 @@ exports.processPayment = functions.runWith({ maxInstances: 1, memory: '256MB', t
  */
 exports.webhookMercadoPago = functions.runWith({ maxInstances: 1, memory: '128MB', timeoutSeconds: 30 }).https.onRequest(async (req, res) => {
     return cors(req, res, async () => {
+        // ── WEBHOOK SIGNATURE VERIFICATION ──────────────────────────────────────
+        // MercadoPago signs webhooks with HMAC-SHA256. Reject unsigned or tampered
+        // notifications to prevent fake payment confirmations.
+        const webhookSecret = process.env.MERCADOPAGO_WEBHOOK_SECRET || functions.config().mercadopago?.webhook_secret;
+        if (webhookSecret) {
+            const xSignature = req.headers['x-signature'];
+            const xRequestId = req.headers['x-request-id'];
+            const dataId = req.query['data.id'] || req.body?.data?.id;
+
+            if (!xSignature) {
+                console.warn('[Webhook] Missing x-signature header — rejecting request');
+                return res.status(403).send('Forbidden: missing signature');
+            }
+
+            // Parse signature parts: ts=...;v1=...
+            const parts = {};
+            xSignature.split(';').forEach(part => {
+                const [k, v] = part.split('=');
+                if (k && v) parts[k.trim()] = v.trim();
+            });
+
+            const manifest = `id:${dataId};request-id:${xRequestId};ts:${parts.ts};`;
+            const expected = crypto
+                .createHmac('sha256', webhookSecret)
+                .update(manifest)
+                .digest('hex');
+
+            if (expected !== parts.v1) {
+                console.warn('[Webhook] Signature mismatch — rejecting tampered notification');
+                return res.status(403).send('Forbidden: invalid signature');
+            }
+        } else {
+            console.warn('[Webhook] MERCADOPAGO_WEBHOOK_SECRET not configured — skipping signature check');
+        }
+        // ────────────────────────────────────────────────────────────────────────
+
         const { type, data } = req.body;
         if (type !== 'payment') return res.status(200).send('OK');
 
@@ -290,25 +364,78 @@ async function sendPaymentNotifications(bookingId, bookingData, status) {
 exports.oauthMercadoPago = functions.runWith({ maxInstances: 1, memory: '128MB', timeoutSeconds: 30 }).https.onRequest(async (req, res) => {
     return cors(req, res, async () => {
         const code = req.query.code;
-        const rawState = req.query.state; // Format: "uid" or "uid|https://app.servigo.cl"
+        const rawState = req.query.state; // Format: "nonce|redirectBase" (web) or "nonce" (mobile)
 
         if (!code || !rawState) {
             return res.status(400).send('Código de autorización o estado (state) faltante.');
         }
 
-        // Parse state: supports "uid|redirectBase" format for web, plain "uid" for mobile
+        // Parse state
         const stateParts = rawState.split('|');
-        const providerId = stateParts[0];
-        const webRedirectBase = stateParts[1] || null;
+        const nonce = stateParts[0];
+        let webRedirectBase = stateParts[1] || null;
+
+        // ── NONCE VERIFICATION ───────────────────────────────────────────────────
+        // The nonce was created by `initiateMpOAuth` and stored in Firestore with
+        // the provider's UID and an expiry timestamp. This prevents attackers from
+        // injecting an arbitrary UID into the state parameter.
+        const nonceRef = db.collection('oauth_states').doc(nonce);
+        const nonceDoc = await nonceRef.get();
+
+        if (!nonceDoc.exists) {
+            console.warn(`[OAuth Security] Nonce not found: ${nonce}`);
+            return res.status(403).send('Estado de OAuth inválido o expirado.');
+        }
+
+        const nonceData = nonceDoc.data();
+        const now = admin.firestore.Timestamp.now();
+
+        if (nonceData.expiresAt.toMillis() < now.toMillis()) {
+            await nonceRef.delete();
+            console.warn(`[OAuth Security] Nonce expired for provider: ${nonceData.providerId}`);
+            return res.status(403).send('Estado de OAuth expirado. Inicia el proceso nuevamente.');
+        }
+
+        const providerId = nonceData.providerId;
+        // Consume the nonce (one-time use)
+        await nonceRef.delete();
+        // ────────────────────────────────────────────────────────────────────────
+
+        // PREVENCIÓN OPEN REDIRECT: Validar webRedirectBase
+        if (webRedirectBase) {
+            const allowedOrigins = [
+                'http://localhost:5173',
+                'https://servigo.cl',
+                'https://app.servigo.cl'
+            ];
+            if (!allowedOrigins.includes(webRedirectBase)) {
+                console.warn(`[OAuth Security] Bloqueado intento de Open Redirect hacia: ${webRedirectBase}`);
+                webRedirectBase = null; // Fallback al deeplink mobile o url por defecto
+            }
+        }
 
         try {
-            const projectId = admin.instanceId ? admin.app().options.projectId : (process.env.GCLOUD_PROJECT || 'pruebaapp-11b43');
+            const projectId = admin.app().options.projectId || process.env.GCLOUD_PROJECT;
             const redirectUri = `https://us-central1-${projectId}.cloudfunctions.net/oauthMercadoPago`;
 
-            const fetch = require('node-fetch');
+            // Validate required OAuth credentials (using new params API)
+            let clientId, clientSecret;
+            try {
+                clientId = mercadopagoClientId.value();
+                clientSecret = mercadopagoClientSecret.value();
+            } catch (err) {
+                console.error('[OAuth] Missing Firebase params:', err.message);
+                return res.status(500).send('Error de configuración: credenciales de OAuth no disponibles.');
+            }
+
+            if (!clientId || !clientSecret) {
+                console.error('[OAuth] MERCADOPAGO_CLIENT_ID or MERCADOPAGO_CLIENT_SECRET not set');
+                return res.status(500).send('Error de configuración: credenciales de OAuth incompletas.');
+            }
+
             const data = {
-                client_id: process.env.MERCADOPAGO_CLIENT_ID || '6497687667850405',
-                client_secret: process.env.MERCADOPAGO_CLIENT_SECRET || process.env.MERCADOPAGO_ACCESS_TOKEN || functions.config().mercadopago?.access_token,
+                client_id: clientId,
+                client_secret: clientSecret,
                 grant_type: 'authorization_code',
                 code: code,
                 redirect_uri: redirectUri
@@ -379,7 +506,8 @@ exports.releaseBookingFunds = functions.runWith({ maxInstances: 1, memory: '256M
             console.log(`[Payout] 🚀 Liberación de fondos iniciada. Booking=${bookingId}, Payment=${paymentId}`);
 
             try {
-                const totalAmount = Number(after.price || 0);
+                // IMPORTANT: Use totalPrice to align with frontend and PaymentService
+                const totalAmount = Number(after.totalPrice || after.price || 0);
                 const fee = Number(after.servigoFee || Math.round(totalAmount * 0.10));
                 const providerAmount = totalAmount - fee;
 

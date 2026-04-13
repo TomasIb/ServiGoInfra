@@ -7,7 +7,12 @@
     "doc": "docs"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "seed:config": "node scripts/seed-config.mjs",
+    "seed:admin": "node scripts/bootstrap-admin.mjs",
+    "seed:demo": "node scripts/seed-demo.mjs",
+    "seed:full": "node scripts/seed-config.mjs --admin && node scripts/seed-demo.mjs",
+    "db:clean": "node scripts/clean-db.mjs"
   },
   "repository": {
     "type": "git",
@@ -22,6 +27,8 @@
   },
   "homepage": "https://github.com/TomasIb/ServiGoInfra#readme",
   "dependencies": {
-    "firebase": "^12.11.0"
+    "dotenv": "^17.4.1",
+    "firebase": "^12.11.0",
+    "firebase-admin": "^13.8.0"
   }
 }

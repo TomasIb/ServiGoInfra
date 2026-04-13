@@ -49,7 +49,7 @@ ServiGoInfra/
 
 ## Firebase Project
 
-- **Project ID:** `pruebaapp-11b43`
+- **Project ID:** Set via `FIREBASE_PROJECT_ID` in `.env` (see `.env.example`)
 - **Region:** `us-central1`
 
 ## Deploy
@@ -93,11 +93,17 @@ firebase deploy --only firestore:indexes
 ## Scripts
 
 ```bash
-# Seed Firestore with demo data (services, providers, clients, bookings)
-node scripts/seed-firestore.mjs
+# Copy and fill env vars first
+cp .env.example .env
 
-# Seed test coupons
-node scripts/seed-coupons.js
+# Seed configurations + admin user
+npm run seed:admin
+
+# (Optional) Add demo providers + services
+npm run seed:demo
+
+# Wipe all data (requires firebase-admin)
+npm run db:clean
 
 # Test escrow payment flow
 node scripts/test-escrow-flow.js

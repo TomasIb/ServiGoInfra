@@ -1,31 +1,48 @@
 rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
-    
-    // Auth helper
+
     function isAuthenticated() {
       return request.auth != null;
     }
 
-    // Services folder: Anyone can read, only authenticated users can upload
-    match /services/{fileName} {
+    // ─── SERVICE IMAGES ────────────────────────────────────────────────────────
+    // Path: /services/{userId}/{fileName}
+    // Any authenticated user can upload (Firestore will enforce ownership via providerId)
+    match /services/{userId}/{fileName} {
       allow read: if true;
-      allow write: if isAuthenticated();
+      allow write: if isAuthenticated() &&
+                      request.resource.size < 5 * 1024 * 1024 && // 5 MB max
+                      request.resource.contentType.matches('image/.*');
+      allow delete: if isAuthenticated();
     }
 
-    // Profile pictures folder: Anyone can read, only the user can upload/delete
-    match /users/{userId}/{allPaths=**} {
-      allow read: if true;
-      allow write: if isAuthenticated() && request.auth.uid == userId;
+    // ─── PROFILE PICTURES ──────────────────────────────────────────────────────
+    // Path: /users/{userId}/...
+    match /users/{userId}/{fileName} {
+      // Profile pictures must be public for the marketplace
+      allow read: if fileName == 'profile.jpg' || fileName == 'avatar.png' || (isAuthenticated() && request.auth.uid == userId);
+      allow write: if isAuthenticated() &&
+                      request.auth.uid == userId &&
+                      request.resource.size < 3 * 1024 * 1024 &&
+                      request.resource.contentType.matches('image/.*');
+      allow delete: if isAuthenticated() && request.auth.uid == userId;
     }
 
-    // Chats folder: Only participants can access
-    // This assumes the file path includes the bookingId
+    // ─── PRIVATE USER DOCUMENTS ────────────────────────────────────────────────
+    match /users/{userId}/documents/{allPaths=**} {
+      allow read, write: if isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // ─── CHAT ATTACHMENTS ──────────────────────────────────────────────────────
     match /chats/{bookingId}/{allPaths=**} {
-      allow read, write: if isAuthenticated(); // For more security, we could fetch firestore room data
+      // In a real production app, we would use custom claims or metadata 
+      // but restricting to authenticated users is the baseline.
+      allow read, write: if isAuthenticated();
+      allow write: if isAuthenticated() && request.resource.size < 10 * 1024 * 1024;
     }
 
-    // Default: Deny all
+    // ─── DEFAULT: deny everything ───────────────────────────────────────────────
     match /{allPaths=**} {
       allow read, write: if false;
     }

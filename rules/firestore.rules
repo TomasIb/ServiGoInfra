@@ -77,11 +77,9 @@ service cloud.firestore {
     // State machine enforcement. Payment transitions (confirmed → payment_held,
     // etc.) happen exclusively via Cloud Functions (Admin SDK) and bypass rules.
     match /bookings/{bookingId} {
-      allow read: if isAdmin() ||
-                     (isAuthenticated() && (
-                       request.auth.uid == resource.data.clientId ||
-                       request.auth.uid == resource.data.providerId
-                     )) || isDemoUser();
+      // Allow authenticated users to read bookings (for availability checking & personal bookings)
+      // Clients need to see other clients' bookings in the same service slot to detect conflicts
+      allow read: if isAuthenticated() || isDemoUser();
 
       // Only an authenticated client can create a booking for themselves.
       allow create: if isAuthenticated() &&

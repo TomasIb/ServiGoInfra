@@ -4,8 +4,7 @@
  * - autoReminder: Cron function that sends email reminders before bookings
  */
 
-const functions = require('firebase-functions')
-const admin = require('firebase-admin')
+const { functions, db, admin } = require('../config');
 
 // ── iCal Feed ─────────────────────────────────────────────────────────────────
 
@@ -84,7 +83,8 @@ exports.icalFeed = functions.https.onRequest(async (req, res) => {
         }
 
         lines.push('BEGIN:VEVENT')
-        lines.push(`UID:servigo-${b.id}@pruebaapp-11b43`)
+        const projectId = admin.app().options.projectId || process.env.GCLOUD_PROJECT || 'servigo'
+        lines.push(`UID:servigo-${b.id}@${projectId}`)
         lines.push(`DTSTART:${toIcalDate(startDt)}`)
         lines.push(`DTEND:${toIcalDate(endDt)}`)
         lines.push(`SUMMARY:${b.serviceTitle || 'Reserva'} — ${b.clientName || ''}`)

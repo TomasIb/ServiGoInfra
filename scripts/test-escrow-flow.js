@@ -19,7 +19,7 @@ async function runTest() {
         
         const mockProvider = {
             id: 'PROV_123',
-            mpAccessToken: 'APP_USR-6497687667850405-032321-d83fd37de836cf9d14a91577714a184e-3287488851' // Using Admin as Provider for test
+            mpAccessToken: process.env.MERCADOPAGO_ACCESS_TOKEN // Provider's MP token for test
         };
 
         const mockService = {

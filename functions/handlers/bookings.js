@@ -101,6 +101,15 @@ exports.updateBookingStatus = functions.runWith({ maxInstances: 1, memory: '128M
     const { bookingId, newStatus, message } = data;
     if (!bookingId || !newStatus) throw new functions.https.HttpsError('invalid-argument', 'Faltan parámetros.');
 
+    const ALLOWED_STATUSES = [
+        'pending_confirmation', 'confirmed', 'payment_held',
+        'in_progress', 'completed_pending_release', 'completed',
+        'cancelled', 'disputed',
+    ];
+    if (!ALLOWED_STATUSES.includes(newStatus)) {
+        throw new functions.https.HttpsError('invalid-argument', `Estado inválido: ${newStatus}`);
+    }
+
     const uid = context.auth.uid;
 
     try {
