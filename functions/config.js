@@ -1,6 +1,5 @@
 const functions = require('firebase-functions/v1');
 const admin = require('firebase-admin');
-const { defineSecret, defineString } = require('firebase-functions/params');
 const { MercadoPagoConfig } = require('mercadopago');
 const { Expo } = require('expo-server-sdk');
 
@@ -12,25 +11,27 @@ if (admin.apps.length === 0) {
 const db = admin.firestore();
 const expo = new Expo();
 
-// ── NEW FIREBASE PARAMS (deprecates functions.config()) ──
-// Set via: firebase functions:secrets:set MERCADOPAGO_ACCESS_TOKEN
-const mercadopagoAccessToken = defineSecret('MERCADOPAGO_ACCESS_TOKEN');
-const mercadopagoClientId = defineString('MERCADOPAGO_CLIENT_ID');
-const mercadopagoClientSecret = defineSecret('MERCADOPAGO_CLIENT_SECRET');
+// ── MercadoPago Configuration ────────────────────────────────────────────────
+// Reads from: functions/.env (Firebase v1 auto-loads this into process.env)
+// Fallback:   functions.config().mercadopago (legacy, deprecated March 2027)
+const MP_ACCESS_TOKEN = process.env.MERCADOPAGO_ACCESS_TOKEN
+    || functions.config().mercadopago?.access_token;
+const MP_CLIENT_ID = process.env.MERCADOPAGO_CLIENT_ID
+    || functions.config().mercadopago?.client_id;
+const MP_CLIENT_SECRET = process.env.MERCADOPAGO_CLIENT_SECRET
+    || functions.config().mercadopago?.client_secret;
+const MP_WEBHOOK_SECRET = process.env.MERCADOPAGO_WEBHOOK_SECRET
+    || functions.config().mercadopago?.webhook_secret;
+const MP_OAUTH_REDIRECT_URI = process.env.MERCADOPAGO_OAUTH_REDIRECT_URI || null;
 
-// Configure Mercado Pago
 let mpClient;
-try {
-    const MP_ACCESS_TOKEN = mercadopagoAccessToken.value();
-    if (MP_ACCESS_TOKEN) {
-        mpClient = new MercadoPagoConfig({ accessToken: MP_ACCESS_TOKEN });
-        console.log('[Config] MercadoPago configured ✅');
-    } else {
-        console.warn('[Config] MercadoPago NOT configured - missing MERCADOPAGO_ACCESS_TOKEN secret');
-    }
-} catch (err) {
-    console.warn('[Config] Could not initialize MercadoPago (param may not be set):', err.message);
+if (MP_ACCESS_TOKEN) {
+    mpClient = new MercadoPagoConfig({ accessToken: MP_ACCESS_TOKEN });
+    console.log('[Config] MercadoPago configured ✅ (token: ...', MP_ACCESS_TOKEN.slice(-6), ')');
+} else {
+    console.warn('[Config] ⚠️ MercadoPago NOT configured - MERCADOPAGO_ACCESS_TOKEN missing from functions/.env');
 }
+// ─────────────────────────────────────────────────────────────────────────────
 
 const ALLOWED_ORIGINS = [
     'https://servigo.cl',
@@ -45,13 +46,14 @@ module.exports = {
     db,
     expo,
     mpClient,
-    // Firebase Params (new API)
-    mercadopagoAccessToken,
-    mercadopagoClientId,
-    mercadopagoClientSecret,
+    // Expose individual MP credentials for OAuth handlers
+    mercadopagoClientId:     { value: () => MP_CLIENT_ID },
+    mercadopagoClientSecret: { value: () => MP_CLIENT_SECRET },
+    mercadopagoAccessToken:  { value: () => MP_ACCESS_TOKEN },
+    mercadopagoWebhookSecret:{ value: () => MP_WEBHOOK_SECRET },
+    mercadopagoOAuthRedirectUri: { value: () => MP_OAUTH_REDIRECT_URI },
     cors: require('cors')({
         origin: (origin, callback) => {
-            // Allow server-to-server requests (no origin header) and whitelisted origins
             if (!origin || ALLOWED_ORIGINS.includes(origin)) {
                 callback(null, true);
             } else {

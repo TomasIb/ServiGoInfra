@@ -9,7 +9,7 @@ const { /* sendBookingReminders, */ handleBookingStatusChange, updateBookingStat
 const { preventDuplicateServices, cleanupDuplicateServices, handleServiceModeration } = require('./handlers/services');
 const { handleReviewCreated } = require('./handlers/reviews');
 const { validateCoupon } = require('./handlers/coupons');
-const { setUserRole, onUserCreate, initiateMpOAuth, activateProviderOnFirstLogin } = require('./handlers/auth');
+const { setUserRole, onUserCreate, bootstrapAdmin, initiateMpOAuth, activateProviderOnFirstLogin } = require('./handlers/auth');
 const { adminCreateProvider, adminToggleService, generateActivationLink, sendPasswordResetEmail } = require('./handlers/admin');
 
 // Export all functions
@@ -44,9 +44,6 @@ module.exports = {
     // Loyalty & Coupons
     validateCoupon,
 
-    // Advanced Payments (Escrow)
-    createEscrowPayment: require('./handlers/payments').createEscrowPayment,
-
     // Agenda & Availability
     icalFeed: require('./handlers/agenda').icalFeed,
     autoReminder: require('./handlers/agenda').autoReminder,
@@ -54,6 +51,7 @@ module.exports = {
     // Auth & Role Management
     setUserRole,
     onUserCreate,
+    bootstrapAdmin,
     initiateMpOAuth,
     activateProviderOnFirstLogin,
 

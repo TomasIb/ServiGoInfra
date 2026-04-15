@@ -43,9 +43,13 @@ async function main() {
     console.log('⏳ Waiting 30s for rules to propagate...')
     await new Promise(resolve => setTimeout(resolve, 30000))
 
-    // 6. Run seed script
-    console.log('🌱 Seeding admin...')
+    // 6. Run seed script (Client SDK for basic structure)
+    console.log('🌱 Seeding configurations and basic admin user...')
     run('node scripts/seed-config.mjs --admin')
+
+    // 7. Set Custom Claims (Admin SDK for security privileges)
+    console.log('🔑 Setting Admin Custom Claims...')
+    run('node scripts/set-admin-claim.mjs')
 
   } catch (err) {
     console.error('\n❌ ERROR during bootstrap:', err.message)

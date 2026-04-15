@@ -1,84 +1,93 @@
 #!/usr/bin/env node
 /**
- * set-admin-claim.mjs — Creates the admin user (if needed) and sets the
- * 'admin' custom claim using the Firebase ADMIN SDK.
+ * set-admin-claim.mjs — Sets the 'admin' custom claim on the admin user
+ * by calling the bootstrapAdmin Cloud Function via the CLIENT SDK.
  *
- * This bypasses Firestore rules entirely because Admin SDK has full access.
- * No need to switch to maintenance rules or do any "sandwich" deploy.
+ * No gcloud ADC or service account key needed — uses email/password auth.
  *
  * Usage:  node scripts/set-admin-claim.mjs
  */
-import admin from 'firebase-admin';
+import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithEmailAndPassword } from 'firebase/auth';
+import { getFunctions, httpsCallable, connectFunctionsEmulator } from 'firebase/functions';
 
-// Initialize with Application Default Credentials (your `firebase login` session)
-admin.initializeApp({
-    projectId: 'pruebaapp-11b43',
-});
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.join(__dirname, '../.env') });
 
-const ADMIN_EMAIL = 'admin@servigo.cl';
-const ADMIN_PASSWORD = 'servigo123';
-const ADMIN_NAME = 'Admin ServiGo';
+// Firebase Client SDK config (same as ServiGoWebApp)
+const firebaseConfig = {
+    apiKey: process.env.FIREBASE_API_KEY,
+    authDomain: process.env.FIREBASE_AUTH_DOMAIN,
+    projectId: process.env.FIREBASE_PROJECT_ID || 'pruebaapp-11b43',
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
+    messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID,
+    appId: process.env.FIREBASE_APP_ID,
+};
+
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@servigo.cl';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'servigo123';
+const BOOTSTRAP_SECRET = process.env.BOOTSTRAP_SECRET || 'servigo-bootstrap-2024';
 
 async function main() {
-    console.log('\n🔑 Admin Setup (Create + Set Custom Claim)\n');
+    console.log('\n🔑 Admin Custom Claim Setup (via Cloud Function)\n');
 
-    let user;
-
-    // 1. Try to find the user, or create them
-    try {
-        user = await admin.auth().getUserByEmail(ADMIN_EMAIL);
-        console.log(`  ✓ User already exists: ${user.uid} (${user.email})`);
-    } catch (err) {
-        if (err.code === 'auth/user-not-found') {
-            console.log(`  → User ${ADMIN_EMAIL} not found. Creating...`);
-            user = await admin.auth().createUser({
-                email: ADMIN_EMAIL,
-                password: ADMIN_PASSWORD,
-                displayName: ADMIN_NAME,
-                emailVerified: true,
-            });
-            console.log(`  ✓ Created user: ${user.uid} (${user.email})`);
-        } else {
-            throw err;
-        }
+    if (!firebaseConfig.apiKey) {
+        console.error('❌ FIREBASE_API_KEY not found in .env');
+        process.exit(1);
     }
 
-    // 2. Set the admin custom claim
-    const currentClaims = user.customClaims || {};
-    console.log(`  Current claims:`, JSON.stringify(currentClaims));
+    // 1. Initialize Firebase Client SDK
+    const app = initializeApp(firebaseConfig);
+    const authInstance = getAuth(app);
+    const functionsInstance = getFunctions(app, 'us-central1');
 
-    await admin.auth().setCustomUserClaims(user.uid, { ...currentClaims, role: 'admin' });
-    console.log(`  ✓ Custom claim { role: 'admin' } SET!`);
+    // Use emulator if running locally (optional)
+    if (process.env.FUNCTIONS_EMULATOR_HOST) {
+        const [host, port] = process.env.FUNCTIONS_EMULATOR_HOST.split(':');
+        connectFunctionsEmulator(functionsInstance, host, parseInt(port));
+        console.log(`  📡 Using functions emulator at ${process.env.FUNCTIONS_EMULATOR_HOST}`);
+    }
 
-    // 3. Write the Firestore document (Admin SDK bypasses rules)
-    const db = admin.firestore();
-    await db.collection('users').doc(user.uid).set({
-        uid: user.uid,
-        email: ADMIN_EMAIL,
-        displayName: ADMIN_NAME,
-        role: 'admin',
-        city: 'Santiago',
-        bio: 'Administrador de la plataforma',
-        isVerified: true,
-        banned: false,
-        rating: 0,
-        reviewCount: 0,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
-    console.log(`  ✓ Firestore users/${user.uid} document created/updated`);
+    // 2. Sign in as the admin user
+    console.log(`  → Signing in as ${ADMIN_EMAIL}...`);
+    let userCredential;
+    try {
+        userCredential = await signInWithEmailAndPassword(authInstance, ADMIN_EMAIL, ADMIN_PASSWORD);
+        console.log(`  ✓ Signed in: ${userCredential.user.uid} (${userCredential.user.email})`);
+    } catch (err) {
+        console.error(`  ❌ Sign-in failed: ${err.message}`);
+        if (err.code === 'auth/user-not-found') {
+            console.error('  💡 Run "npm run seed:admin" first to create the admin user.');
+        }
+        process.exit(1);
+    }
 
-    // 4. Verify it worked
-    const verifyUser = await admin.auth().getUser(user.uid);
-    console.log(`  ✓ Verification — claims are now:`, JSON.stringify(verifyUser.customClaims));
+    // 3. Call the bootstrapAdmin Cloud Function
+    console.log('  → Calling bootstrapAdmin Cloud Function...');
+    const bootstrapAdmin = httpsCallable(functionsInstance, 'bootstrapAdmin');
 
-    console.log('\n✅ Done! Now log out and back in at the Webapp to pick up the admin claim.\n');
+    try {
+        const result = await bootstrapAdmin({ secret: BOOTSTRAP_SECRET });
+        console.log(`  ✓ Custom claim { role: 'admin' } SET!`);
+        console.log(`  ✓ UID: ${result.data.uid}`);
+        console.log(`  ✓ Email: ${result.data.email}`);
+        console.log(`  ✓ Claims: ${JSON.stringify(result.data.claims)}`);
+    } catch (err) {
+        console.error(`  ❌ bootstrapAdmin failed: ${err.message}`);
+        if (err.code === 'functions/not-found') {
+            console.error('  💡 Deploy functions first: firebase deploy --only functions');
+        }
+        process.exit(1);
+    }
+
+    console.log('\n✅ Done! Log out and back in at the Webapp to pick up the admin claim.\n');
     process.exit(0);
 }
 
 main().catch(err => {
     console.error('\n❌ Fatal error:', err.message);
-    if (err.message.includes('Could not load the default credentials')) {
-        console.error('\n💡 Fix: Run "gcloud auth application-default login" first.\n');
-    }
     process.exit(1);
 });

@@ -1,112 +1,10 @@
 const BookingRepository = require('../repositories/BookingRepository');
-const MercadoPagoService = require('./MercadoPagoService');
 
 /**
  * SERVICE LAYER: Orchestrates the payment workflow.
+ * All payments go through marketplace account — no provider OAuth required.
  */
 class PaymentService {
-    /**
-     * Business Logic for splitting payments.
-     * @param {string} bookingId - The Firestore document ID.
-     * @param {number} amount - Total amount in CLP.
-     * @param {object} provider - The user object from Firestore.
-     * @param {object} service - The service object from Firestore.
-     */
-    async initiateSplitPayment(bookingId, amount, provider, service, options = {}) {
-        if (!provider.mpAccessToken) {
-            throw new Error('PROVIDER_NOT_LINKED_MP_OAUTH');
-        }
-
-        const marketplaceFee = Math.round(Number(amount) * 0.10); // 10% ServiGo Fee
-        const webAppUrl = options.webAppUrl || process.env.WEB_APP_URL || '';
-
-        // Build back_urls: web URLs if webAppUrl provided, mobile deep links otherwise
-        const backUrls = webAppUrl ? {
-            success: `${webAppUrl}/client/bookings/${bookingId}?payment=success`,
-            failure: `${webAppUrl}/client/bookings/${bookingId}?payment=failure`,
-            pending: `${webAppUrl}/client/bookings/${bookingId}?payment=pending`,
-        } : {
-            success: 'servigo://payment/success',
-            failure: 'servigo://payment/failure',
-            pending: 'servigo://payment/pending',
-        };
-
-        const preferenceData = {
-            items: [{
-                id: service.id,
-                title: service.title || 'Servicio Profesional',
-                quantity: 1,
-                currency_id: 'CLP',
-                unit_price: Number(amount),
-            }],
-            back_urls: backUrls,
-            auto_return: 'approved',
-            external_reference: bookingId,
-            marketplace_fee: marketplaceFee,
-            binary_mode: true,
-            capture: false,
-            operation_type: 'regular_payment',
-            marketplace_deferred_release: true,
-        };
-
-        const preference = await MercadoPagoService.createSplitPreference(
-            provider.mpAccessToken, 
-            preferenceData
-        );
-
-        // Update booking state in Firestore via Repository
-        await BookingRepository.update(bookingId, {
-            paymentPreferenceId: preference.id,
-            paymentStatus: 'pending',
-            collectorType: 'split_payment',
-            servigoFee: marketplaceFee,
-            providerPayout: Number(amount) - marketplaceFee,
-            retenidoStatus: 'none' // Initialize
-        });
-
-        return { initPoint: preference.initPoint, preferenceId: preference.id };
-    }
-
-    /**
-     * PAGO RETENIDO: Direct Payment Creation.
-     * Use this with card tokens from the frontend.
-     */
-    async createPagoRetenidoPayment(bookingId, amount, provider, paymentData) {
-        if (!provider.mpAccessToken) {
-            throw new Error('PROVIDER_NOT_LINKED_MP_OAUTH');
-        }
-
-        const marketplaceFee = Math.round(Number(amount) * 0.10);
-
-        const body = {
-            transaction_amount: Number(amount),
-            description: `ServiGo Pago Retenido: Booking ${bookingId}`,
-            payment_method_id: paymentData.paymentMethodId,
-            token: paymentData.token, // Card token from frontend
-            installments: 1,
-            payer: {
-                email: paymentData.email,
-            },
-            // THE CRITICAL FIELDS FOR ESCROW (Held in MP)
-            capture: false, 
-            application_fee: marketplaceFee,
-            external_reference: bookingId,
-            binary_mode: true
-        };
-
-        const payment = await MercadoPagoService.createPayment(provider.mpAccessToken, body);
-
-        // Update booking with the HELD payment ID
-        await BookingRepository.update(bookingId, {
-            paymentId: payment.id,
-            paymentStatus: 'authorized', // Funds are pre-authorized (held)
-            retenidoStatus: 'held',
-            captured: false
-        });
-
-        return payment;
-    }
-
     /**
      * LIBERACIÓN DEL PAGO: Captures the pre-authorized payment.
      * Use when the service is accepted/completed.
@@ -156,9 +54,10 @@ class PaymentService {
             isPaid = true;
             retenidoStatus = 'held';
         } else if (mpStatus === 'approved') {
-            appStatus = 'confirmed';
+            // With marketplace_deferred_release, approved = funds held by MP (not released)
+            appStatus = 'payment_held';
             isPaid = true;
-            retenidoStatus = 'released';
+            retenidoStatus = 'held';
         } else if (['rejected', 'cancelled', 'refunded'].includes(mpStatus)) {
             appStatus = 'payment_failed';
             isPaid = false;

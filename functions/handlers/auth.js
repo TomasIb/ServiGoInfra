@@ -1,4 +1,4 @@
-const { functions, db, admin, mercadopagoClientId, mercadopagoClientSecret } = require('../config');
+const { functions, db, admin, mercadopagoClientId, mercadopagoClientSecret, mercadopagoOAuthRedirectUri } = require('../config');
 const crypto = require('crypto');
 
 /**
@@ -52,10 +52,60 @@ exports.onUserCreate = functions.auth.user().onCreate(async (user) => {
             return;
         }
 
+        // Check if Firestore already marks this user as admin (e.g. seeded by bootstrap)
+        const userDoc = await db.collection('users').doc(user.uid).get();
+        if (userDoc.exists && userDoc.data()?.role === 'admin') {
+            await admin.auth().setCustomUserClaims(user.uid, { role: 'admin' });
+            console.log(`[Auth] Admin role set for user ${user.uid} (from Firestore).`);
+            return;
+        }
+
         await admin.auth().setCustomUserClaims(user.uid, { role: 'client' });
         console.log(`[Auth] Default 'client' role set for new user: ${user.uid}`);
     } catch (error) {
         console.error(`[Auth] Failed to set default role for ${user.uid}:`, error);
+    }
+});
+
+/**
+ * Bootstrap the first admin user. Secured by a secret key from functions/.env
+ * instead of requiring admin claims (solves chicken-and-egg problem).
+ *
+ * The caller must be authenticated AND provide the correct BOOTSTRAP_SECRET.
+ * This is called from scripts/set-admin-claim.mjs via the Client SDK.
+ */
+exports.bootstrapAdmin = functions.runWith({ maxInstances: 1, memory: '128MB', timeoutSeconds: 30 }).https.onCall(async (data, context) => {
+    if (!context.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesión.');
+    }
+
+    const { secret } = data;
+    const expectedSecret = process.env.BOOTSTRAP_SECRET || 'servigo-bootstrap-2024';
+
+    if (secret !== expectedSecret) {
+        throw new functions.https.HttpsError('permission-denied', 'Secret inválido.');
+    }
+
+    const uid = context.auth.uid;
+    const email = context.auth.token?.email;
+
+    try {
+        // Set admin custom claim
+        await admin.auth().setCustomUserClaims(uid, { role: 'admin' });
+
+        // Update Firestore document
+        await db.collection('users').doc(uid).set({
+            role: 'admin',
+        }, { merge: true });
+
+        // Verify
+        const updatedUser = await admin.auth().getUser(uid);
+        console.log(`[Bootstrap] Admin claim set for ${email} (${uid}). Claims:`, updatedUser.customClaims);
+
+        return { success: true, uid, email, claims: updatedUser.customClaims };
+    } catch (error) {
+        console.error('[Bootstrap] Error:', error);
+        throw new functions.https.HttpsError('internal', error.message);
     }
 });
 
@@ -124,7 +174,8 @@ exports.initiateMpOAuth = functions.runWith({ maxInstances: 1, memory: '128MB', 
     const state = webRedirectBase ? `${nonce}|${webRedirectBase}` : nonce;
 
     const projectId = admin.app().options.projectId || process.env.GCLOUD_PROJECT;
-    const redirectUri = `https://us-central1-${projectId}.cloudfunctions.net/oauthMercadoPago`;
+    const redirectUri = mercadopagoOAuthRedirectUri.value()
+        || `https://us-central1-${projectId}.cloudfunctions.net/oauthMercadoPago`;
     const clientId = mercadopagoClientId.value();
 
     if (!clientId) {
@@ -132,6 +183,8 @@ exports.initiateMpOAuth = functions.runWith({ maxInstances: 1, memory: '128MB', 
     }
 
     const authUrl = `https://auth.mercadopago.cl/authorization?client_id=${clientId}&response_type=code&platform_id=mp&state=${encodeURIComponent(state)}&redirect_uri=${encodeURIComponent(redirectUri)}`;
+
+    console.log(`[OAuth] Initiating MP OAuth for UID=${uid}, clientId=...${String(clientId).slice(-4)}, redirectUri=${redirectUri}`);
 
     return { authUrl };
 });
