@@ -80,17 +80,40 @@ exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB',
         // 3. Calculate marketplace fee (10%)
         const marketplaceFee = Math.round(Number(amount) * 0.10);
 
-        // 4. Build back_urls
-        const baseUrl = webAppUrl || process.env.WEB_APP_URL || '';
-        const backUrls = baseUrl ? {
+        // 4. Build back_urls — prefer server-side WEB_APP_URL (trusted) over client-sent value
+        let baseUrl = process.env.WEB_APP_URL;
+
+        // Fallback: Firebase config
+        if (!baseUrl) {
+            try {
+                baseUrl = functions.config().app?.web_url || '';
+            } catch (e) {
+                functions.logger.warn(`[Payment] Could not read app.web_url from config: ${e.message}`);
+            }
+        }
+
+        // Last resort: client-provided URL (only if it's a valid public URL)
+        if (!baseUrl && webAppUrl && webAppUrl.startsWith('https://') && !webAppUrl.includes('localhost')) {
+            baseUrl = webAppUrl;
+        }
+
+        functions.logger.info(`[Payment] Resolved baseUrl: "${baseUrl}"`);
+
+        if (!baseUrl || !baseUrl.startsWith('https://')) {
+            functions.logger.error(`[Payment] WEB_APP_URL not configured or invalid: "${baseUrl}".`);
+            throw new functions.https.HttpsError(
+                'failed-precondition',
+                'SERVER_CONFIG_ERROR: La URL del servidor no está configurada correctamente. Contacta soporte.'
+            );
+        }
+
+        const backUrls = {
             success: `${baseUrl}/client/bookings/${bookingId}?payment=success`,
             failure: `${baseUrl}/client/bookings/${bookingId}?payment=failure`,
             pending: `${baseUrl}/client/bookings/${bookingId}?payment=pending`,
-        } : {
-            success: 'servigo://payment/success',
-            failure: 'servigo://payment/failure',
-            pending: 'servigo://payment/pending',
         };
+
+        functions.logger.info(`[Payment] Back URLs constructed: success=${backUrls.success}`);
 
         // 5. Build notification_url (explicit webhook pointing at ServiGo's webhookMP)
         const projectId = admin.app().options.projectId || process.env.GCLOUD_PROJECT;
