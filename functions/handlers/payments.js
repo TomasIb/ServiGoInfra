@@ -1,5 +1,5 @@
 const { functions, db, mpClient, cors, admin, expo, mercadopagoClientId, mercadopagoClientSecret, mercadopagoOAuthRedirectUri } = require('../config');
-const { Preference, Payment } = require('mercadopago');
+const { MercadoPagoConfig, Preference, Payment } = require('mercadopago');
 const { Expo } = require('expo-server-sdk');
 const crypto = require('crypto');
 
@@ -7,12 +7,20 @@ const crypto = require('crypto');
 const PaymentService = require('../services/PaymentService');
 
 /**
- * CAPA 1 - FUNCIÓN 1: Crear Preferencia de Pago (Checkout Pro - Marketplace Centralizado)
- * Todos los pagos van a la cuenta marketplace. No requiere OAuth del proveedor.
- * Fondos retenidos via marketplace_deferred_release hasta que se liberen explícitamente.
+ * CAPA 1 - FUNCIÓN 1: Crear Preferencia de Pago (Checkout Pro - MP Marketplace Split con OAuth)
+ *
+ * Usa el access_token OAuth del proveedor para crear la preferencia. Así:
+ *   - El pago se registra en la cuenta MP del proveedor (vía OAuth-link).
+ *   - ServiGo actúa como marketplace y cobra `marketplace_fee` (10%).
+ *   - `marketplace_deferred_release: true` retiene los fondos hasta que ServiGo
+ *     los libere explícitamente (PUT money_release_date con el token del proveedor).
+ *
+ * Precondición: el proveedor DEBE haber vinculado su cuenta MP vía OAuth.
+ * Si no, se lanza `failed-precondition / PROVIDER_NOT_LINKED_MP_OAUTH` y el
+ * frontend muestra un mensaje claro + bloquea el botón de pagar.
  */
 exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB', timeoutSeconds: 30 }).https.onCall(async (data, context) => {
-    functions.logger.info(`[Payment] createPreference (Marketplace) triggered`, { auth: !!context.auth, uid: context.auth?.uid });
+    functions.logger.info(`[Payment] createPreference (OAuth Split) triggered`, { auth: !!context.auth, uid: context.auth?.uid });
 
     if (!context.auth) throw new functions.https.HttpsError('unauthenticated', 'SESSION_NOT_RECOGNIZED_BY_SERVER');
 
@@ -38,7 +46,28 @@ exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB',
             throw new functions.https.HttpsError('failed-precondition', 'El monto de la reserva no es válido.');
         }
 
-        // Resolve serviceId from booking if not provided
+        // 1. Load provider and verify MP OAuth link
+        const providerId = bookingData.providerId;
+        if (!providerId) {
+            throw new functions.https.HttpsError('failed-precondition', 'La reserva no tiene proveedor asignado.');
+        }
+        const providerDoc = await db.collection('users').doc(providerId).get();
+        if (!providerDoc.exists) {
+            throw new functions.https.HttpsError('not-found', 'Proveedor no encontrado.');
+        }
+        const providerData = providerDoc.data();
+        const providerAccessToken = providerData.mpAccessToken;
+        const providerCollectorId = providerData.mpCollectorId;
+
+        if (!providerAccessToken || !providerCollectorId) {
+            functions.logger.warn(`[Payment] Provider ${providerId} has not linked MP OAuth — cannot create preference for booking=${bookingId}`);
+            throw new functions.https.HttpsError(
+                'failed-precondition',
+                'PROVIDER_NOT_LINKED_MP_OAUTH: Este proveedor aún no ha vinculado su cuenta de MercadoPago. Contáctalo o elige otro proveedor.'
+            );
+        }
+
+        // 2. Resolve serviceId from booking if not provided
         const resolvedServiceId = serviceId || bookingData.serviceId;
         if (!resolvedServiceId) {
             throw new functions.https.HttpsError('failed-precondition', 'No se encontró el servicio asociado a esta reserva.');
@@ -48,10 +77,10 @@ exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB',
         if (!serviceDoc.exists) throw new functions.https.HttpsError('not-found', 'Servicio no encontrado');
         const serviceData = serviceDoc.data();
 
-        // Calculate marketplace fee (10%)
+        // 3. Calculate marketplace fee (10%)
         const marketplaceFee = Math.round(Number(amount) * 0.10);
 
-        // Build back_urls
+        // 4. Build back_urls
         const baseUrl = webAppUrl || process.env.WEB_APP_URL || '';
         const backUrls = baseUrl ? {
             success: `${baseUrl}/client/bookings/${bookingId}?payment=success`,
@@ -63,8 +92,14 @@ exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB',
             pending: 'servigo://payment/pending',
         };
 
-        // Create preference directly with marketplace mpClient
-        const preferenceClient = new Preference(mpClient);
+        // 5. Build notification_url (explicit webhook pointing at ServiGo's webhookMP)
+        const projectId = admin.app().options.projectId || process.env.GCLOUD_PROJECT;
+        const notificationUrl = `https://us-central1-${projectId}.cloudfunctions.net/webhookMercadoPago`;
+
+        // 6. Create MP client with the PROVIDER'S OAuth access token (not the marketplace token)
+        const providerMpClient = new MercadoPagoConfig({ accessToken: providerAccessToken });
+        const preferenceClient = new Preference(providerMpClient);
+
         const preferenceResponse = await preferenceClient.create({
             body: {
                 items: [{
@@ -80,16 +115,19 @@ exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB',
                 marketplace_fee: marketplaceFee,
                 binary_mode: true,
                 marketplace_deferred_release: true,
+                notification_url: notificationUrl,
+                metadata: { bookingId, providerId },
             }
         });
 
-        functions.logger.info(`[Payment] Preference created: ${preferenceResponse.id}, init_point: ${preferenceResponse.init_point}`);
+        functions.logger.info(`[Payment] Preference created via provider OAuth: preferenceId=${preferenceResponse.id}, providerId=${providerId}, collectorId=${providerCollectorId}`);
 
-        // Update booking with preference info
+        // 7. Update booking with preference info + providerCollectorId for later lookups
         await db.collection('bookings').doc(bookingId).update({
             paymentPreferenceId: preferenceResponse.id,
             paymentStatus: 'pending',
-            collectorType: 'marketplace_deferred',
+            collectorType: 'split_marketplace_deferred',
+            providerMpCollectorId: providerCollectorId,
             servigoFee: marketplaceFee,
             providerPayout: Number(amount) - marketplaceFee,
             retenidoStatus: 'none',
@@ -97,7 +135,12 @@ exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB',
 
         return { success: true, initPoint: preferenceResponse.init_point, preferenceId: preferenceResponse.id };
     } catch (error) {
-        functions.logger.error(`[Payment] Error: ${error.message}`, error);
+        // Preserve HttpsError codes so the frontend can distinguish PROVIDER_NOT_LINKED_MP_OAUTH
+        if (error instanceof functions.https.HttpsError) {
+            functions.logger.warn(`[Payment] createPreference HttpsError: ${error.code} — ${error.message}`);
+            throw error;
+        }
+        functions.logger.error(`[Payment] createPreference unexpected error: ${error.message}`, error);
         throw new functions.https.HttpsError('internal', error.message);
     }
 });
@@ -393,21 +436,16 @@ async function sendPaymentNotifications(bookingId, bookingData, status) {
 exports.oauthMercadoPago = functions.runWith({ maxInstances: 1, memory: '128MB', timeoutSeconds: 30 }).https.onRequest(async (req, res) => {
     return cors(req, res, async () => {
         const code = req.query.code;
-        const rawState = req.query.state; // Format: "nonce|redirectBase" (web) or "nonce" (mobile)
+        const nonce = req.query.state; // ONLY nonce (no pipe format)
 
-        if (!code || !rawState) {
+        if (!code || !nonce) {
             return res.status(400).send('Código de autorización o estado (state) faltante.');
         }
 
-        // Parse state
-        const stateParts = rawState.split('|');
-        const nonce = stateParts[0];
-        let webRedirectBase = stateParts[1] || null;
-
         // ── NONCE VERIFICATION ───────────────────────────────────────────────────
         // The nonce was created by `initiateMpOAuth` and stored in Firestore with
-        // the provider's UID and an expiry timestamp. This prevents attackers from
-        // injecting an arbitrary UID into the state parameter.
+        // the provider's UID, webRedirectBase, and expiry timestamp. This prevents
+        // attackers from injecting an arbitrary UID into the state parameter.
         const nonceRef = db.collection('oauth_states').doc(nonce);
         const nonceDoc = await nonceRef.get();
 
@@ -426,6 +464,7 @@ exports.oauthMercadoPago = functions.runWith({ maxInstances: 1, memory: '128MB',
         }
 
         const providerId = nonceData.providerId;
+        let webRedirectBase = nonceData.webRedirectBase || null;
         // Consume the nonce (one-time use)
         await nonceRef.delete();
         // ────────────────────────────────────────────────────────────────────────
@@ -551,14 +590,30 @@ exports.releaseBookingFunds = functions.runWith({ maxInstances: 1, memory: '256M
 
                 // ── SINCRONIZACIÓN CON MERCADO PAGO ──
                 if (paymentId) {
+                    // Load provider OAuth token — payments live on the provider's account
+                    // because createPreference was called with their access_token.
+                    let providerAccessToken = null;
+                    if (after.providerId) {
+                        try {
+                            const providerDoc = await db.collection('users').doc(after.providerId).get();
+                            providerAccessToken = providerDoc.exists ? providerDoc.data().mpAccessToken : null;
+                        } catch (e) {
+                            console.warn(`[Escrow] No se pudo leer provider token: ${e.message}`);
+                        }
+                    }
                     const marketplaceToken = process.env.MERCADOPAGO_ACCESS_TOKEN;
+                    const releaseToken = providerAccessToken || marketplaceToken;
 
-                    // CASE A: Payment is 'authorized' (Held via capture:false)
+                    // CASE A: Payment is 'authorized' (Held via capture:false — legacy Checkout API)
                     // We need to CAPTURE it to actually transfer money.
                     if (after.paymentStatus === 'authorized' || after.escrowStatus === 'held' || after.captured === false) {
                         try {
                             const { Payment } = require('mercadopago');
-                            const paymentClient = new Payment(mpClient);
+                            // Use provider's client if available (payment is on their account)
+                            const clientForCapture = providerAccessToken
+                                ? new MercadoPagoConfig({ accessToken: providerAccessToken })
+                                : mpClient;
+                            const paymentClient = new Payment(clientForCapture);
                             console.log(`[Escrow] 🎯 Capturar fondos pre-autorizados (capture: true) para Booking=${bookingId}`);
 
                             const captureResult = await paymentClient.capture({ id: paymentId });
@@ -576,17 +631,19 @@ exports.releaseBookingFunds = functions.runWith({ maxInstances: 1, memory: '256M
                     }
                     // CASE B: Payment approved with marketplace_deferred_release.
                     // Release funds early by setting money_release_date = today.
-                    // Uses marketplace token (all payments go through marketplace account).
-                    else if (marketplaceToken) {
+                    // Uses the provider's OAuth token because the payment is on their account
+                    // (sponsor-linked to the ServiGo marketplace).
+                    else if (releaseToken) {
                         try {
                             const today = new Date().toISOString();
+                            const tokenSource = providerAccessToken ? 'provider_oauth' : 'marketplace_fallback';
 
-                            console.log(`[Escrow] 🔔 Liberando fondos mediante PUT money_release_date para Booking=${bookingId}`);
+                            console.log(`[Escrow] 🔔 Liberando fondos mediante PUT money_release_date para Booking=${bookingId} (token=${tokenSource})`);
 
                             const releaseResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
                                 method: 'PUT',
                                 headers: {
-                                    'Authorization': `Bearer ${marketplaceToken}`,
+                                    'Authorization': `Bearer ${releaseToken}`,
                                     'Content-Type': 'application/json'
                                 },
                                 body: JSON.stringify({ money_release_date: today })

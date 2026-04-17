@@ -164,14 +164,17 @@ exports.initiateMpOAuth = functions.runWith({ maxInstances: 1, memory: '128MB', 
     const nonce = crypto.randomBytes(32).toString('hex');
     const expiresAt = admin.firestore.Timestamp.fromMillis(Date.now() + 10 * 60 * 1000); // 10 minutes
 
+    // Store nonce + webRedirectBase in Firestore for callback validation
     await db.collection('oauth_states').doc(nonce).set({
         providerId: uid,
+        webRedirectBase: webRedirectBase || null,
         expiresAt,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    // Build state: "nonce|redirectBase" or just "nonce"
-    const state = webRedirectBase ? `${nonce}|${webRedirectBase}` : nonce;
+    // State sent to MP must be ONLY the nonce (no special chars like |)
+    // The webRedirectBase is already saved in Firestore and will be retrieved in the callback
+    const state = nonce;
 
     const projectId = admin.app().options.projectId || process.env.GCLOUD_PROJECT;
     const redirectUri = mercadopagoOAuthRedirectUri.value()
