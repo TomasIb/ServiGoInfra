@@ -137,7 +137,10 @@ exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB',
                 external_reference: bookingId,
                 marketplace_fee: marketplaceFee,
                 binary_mode: true,
-                marketplace_deferred_release: true,
+                // NOTE: marketplace_deferred_release is NOT a valid Preference API field —
+                // MP silently ignores it. The actual fund retention happens in the webhook:
+                // after payment approval, PaymentService.holdFundsInMP() calls
+                // PUT /v1/payments/{id} with money_release_date = +30 days.
                 notification_url: notificationUrl,
                 metadata: { bookingId, providerId },
             }
@@ -334,8 +337,16 @@ exports.webhookMercadoPago = functions.runWith({ maxInstances: 1, memory: '128MB
 
             // ── CENTRALIZED STATUS SYNC (ADR-001) ──
             const syncResult = await PaymentService.updatePaymentStatusSync(bookingId, paymentData);
-            
+
             console.log(`[Webhook Sync] Result: BookingID=${bookingId}, Status=${syncResult.status}`);
+
+            // ── HOLD FUNDS IN MP (Pago Retenido) ──
+            // After payment is confirmed, immediately set money_release_date to 30 days
+            // so funds stay retained until client approves or auto-release triggers.
+            if (syncResult.paid && syncResult.paymentId) {
+                const holdResult = await PaymentService.holdFundsInMP(bookingId, syncResult.paymentId);
+                console.log(`[Webhook] Fund hold result for BookingID=${bookingId}:`, holdResult);
+            }
 
             // Send notifications if status indicating success
             if (syncResult.paid) {
@@ -385,8 +396,14 @@ exports.verifyPayment = functions.runWith({ maxInstances: 1, memory: '128MB', ti
 
             // ── CENTRALIZED STATUS SYNC (ADR-001) ──
             const syncResult = await PaymentService.updatePaymentStatusSync(bookingId, payment);
-            
+
             console.log(`[Verify Sync] Result: BookingID=${bookingId}, Status=${syncResult.status}`);
+
+            // ── HOLD FUNDS (Pago Retenido) ──
+            if (syncResult.paid && syncResult.paymentId) {
+                const holdResult = await PaymentService.holdFundsInMP(bookingId, syncResult.paymentId);
+                console.log(`[Verify] Fund hold result for BookingID=${bookingId}:`, holdResult);
+            }
 
             return {
                 found: true,
@@ -771,7 +788,7 @@ exports.initiateRefund = functions.runWith({ maxInstances: 1, memory: '256MB', t
             throw new functions.https.HttpsError('permission-denied', 'Solo el cliente puede abrir una disputa.');
         }
 
-        const validStatuses = ['completed_pending_release', 'payment_held', 'confirmed', 'in_progress'];
+        const validStatuses = ['completed_pending_release', 'payment_held', 'pending_confirmation', 'confirmed', 'in_progress'];
         if (!validStatuses.includes(booking.status)) {
             throw new functions.https.HttpsError('failed-precondition', `No se puede disputar en estado: ${booking.status}`);
         }
