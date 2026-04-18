@@ -27,8 +27,9 @@ class PaymentService {
         const mpStatus = paymentData.status;
 
         if (mpStatus === 'authorized' || mpStatus === 'approved') {
-            // Money en cuenta marketplace — booking espera aprobación del proveedor
-            appStatus = 'pending_confirmation';
+            // Pago aprobado — fondos retenidos en cuenta marketplace
+            // Booking ahora espera que el proveedor inicie el servicio
+            appStatus = 'payment_held';
             isPaid = true;
             retenidoStatus = 'held';
         } else if (['rejected', 'cancelled', 'refunded'].includes(mpStatus)) {
