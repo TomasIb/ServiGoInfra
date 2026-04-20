@@ -7,19 +7,38 @@ const crypto = require('crypto');
 const PaymentService = require('../services/PaymentService');
 
 /**
- * CAPA 1 - FUNCIÓN 1: Crear Preferencia de Pago (Checkout Pro - MODELO CUSTODIAL)
+ * Formatea un RUT chileno (almacenado como "12345678K") como "12.345.678-K".
+ * Se usa solo para logs / mensajes humanos; los datos se guardan sin formato.
+ */
+function formatRutServer(rut) {
+    if (!rut) return '';
+    const clean = String(rut).replace(/[^0-9kK]/g, '').toUpperCase();
+    if (clean.length < 2) return clean;
+    const body = clean.slice(0, -1);
+    const dv = clean.slice(-1);
+    const withDots = body.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+    return `${withDots}-${dv}`;
+}
+
+/**
+ * CAPA 1 - FUNCIÓN 1: Crear Preferencia de Pago (Checkout Pro - SPLIT / CUSTODIAL HÍBRIDO)
  *
- * Custodial model: el dinero va 100% a la cuenta MP del marketplace (ServiGo).
- * Queda naturalmente retenido ahí hasta que el cliente apruebe el servicio
- * o se cumpla la ventana de auto-liberación por categoría, momento en el cual
- * ServiGo transfiere el 86.2% al proveedor (payout manual/automatizado).
+ * Modelo híbrido:
+ *   - Si el proveedor tiene OAuth vinculado (mpAccessToken), usamos el modelo
+ *     SPLIT oficial de MP: la preferencia se crea con el token del proveedor,
+ *     incluyendo `marketplace_fee` (10% para ServiGo). MP automáticamente divide
+ *     el dinero al aprobarse el pago. Para retener fondos se usa `money_release_date`.
+ *     Al liberar (cliente aprueba o vence ventana), se actualiza `money_release_date`
+ *     a la fecha actual vía PUT al payment → MP libera automáticamente al proveedor.
  *
- * No se hace split a nivel de preferencia — por eso NO se usa el OAuth del
- * proveedor ni `marketplace_fee`. El proveedor no necesita cuenta MP vinculada
- * para que el cliente pueda pagar (aunque se recomienda para recibir el payout).
+ *   - Si el proveedor NO tiene OAuth, fallback CUSTODIAL: todo va a la cuenta
+ *     marketplace, queda encolado para transferencia manual desde el dashboard.
+ *
+ * Esta es la única forma oficial en MP de automatizar payouts a proveedores —
+ * MP NO expone una API pública para transferir entre cuentas post-pago.
  */
 exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB', timeoutSeconds: 30 }).https.onCall(async (data, context) => {
-    functions.logger.info(`[Payment] createPreference (Custodial) triggered`, { auth: !!context.auth, uid: context.auth?.uid });
+    functions.logger.info(`[Payment] createPreference triggered`, { auth: !!context.auth, uid: context.auth?.uid });
 
     if (!context.auth) throw new functions.https.HttpsError('unauthenticated', 'SESSION_NOT_RECOGNIZED_BY_SERVER');
 
@@ -45,7 +64,7 @@ exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB',
             throw new functions.https.HttpsError('failed-precondition', 'El monto de la reserva no es válido.');
         }
 
-        // 1. Load provider (optional — only for metadata / eventual payout)
+        // 1. Load provider (required to determine payment model)
         const providerId = bookingData.providerId;
         if (!providerId) {
             throw new functions.https.HttpsError('failed-precondition', 'La reserva no tiene proveedor asignado.');
@@ -56,9 +75,11 @@ exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB',
         }
         const providerData = providerDoc.data();
         const providerCollectorId = providerData.mpCollectorId || null;
+        const providerAccessToken = providerData.mpAccessToken || null;
+        const canSplit = !!(providerCollectorId && providerAccessToken);
 
-        if (!providerCollectorId) {
-            functions.logger.warn(`[Payment] Provider ${providerId} not linked to MP — payout will be manual when funds release`);
+        if (!canSplit) {
+            functions.logger.warn(`[Payment] Provider ${providerId} not OAuth-linked — falling back to custodial (manual payout)`);
         }
 
         // 2. Resolve serviceId from booking if not provided
@@ -71,13 +92,12 @@ exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB',
         if (!serviceDoc.exists) throw new functions.https.HttpsError('not-found', 'Servicio no encontrado');
         const serviceData = serviceDoc.data();
 
-        // 3. Calculate ServiGo's commission (10%) — not a split, just bookkeeping
+        // 3. Calculate ServiGo's marketplace commission (10%)
         const marketplaceFee = Math.round(Number(amount) * 0.10);
 
         // 4. Build back_urls — prefer server-side WEB_APP_URL (trusted) over client-sent value
         let baseUrl = process.env.WEB_APP_URL;
 
-        // Fallback: Firebase config
         if (!baseUrl) {
             try {
                 baseUrl = functions.config().app?.web_url || '';
@@ -86,12 +106,9 @@ exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB',
             }
         }
 
-        // Last resort: client-provided URL (only if it's a valid public URL)
         if (!baseUrl && webAppUrl && webAppUrl.startsWith('https://') && !webAppUrl.includes('localhost')) {
             baseUrl = webAppUrl;
         }
-
-        functions.logger.info(`[Payment] Resolved baseUrl: "${baseUrl}"`);
 
         if (!baseUrl || !baseUrl.startsWith('https://')) {
             functions.logger.error(`[Payment] WEB_APP_URL not configured or invalid: "${baseUrl}".`);
@@ -107,44 +124,54 @@ exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB',
             pending: `${baseUrl}/client/bookings/${bookingId}?payment=pending`,
         };
 
-        functions.logger.info(`[Payment] Back URLs constructed: success=${backUrls.success}`);
-
         // 5. Build notification_url (explicit webhook pointing at ServiGo's webhookMP)
         const projectId = admin.app().options.projectId || process.env.GCLOUD_PROJECT;
         const notificationUrl = `https://us-central1-${projectId}.cloudfunctions.net/webhookMercadoPago`;
 
-        // 6. Create MP client with the MARKETPLACE access token — custodial model.
-        // All funds land in ServiGo's MP account, held naturally until release trigger.
-        const preferenceClient = new Preference(mpClient);
+        // 6. Create preference — split if possible, custodial fallback otherwise
+        const preferenceBody = {
+            items: [{
+                id: resolvedServiceId,
+                title: serviceData.title || bookingData.serviceTitle || 'Servicio Profesional',
+                quantity: 1,
+                currency_id: 'CLP',
+                unit_price: Number(amount),
+            }],
+            back_urls: backUrls,
+            auto_return: 'approved',
+            external_reference: bookingId,
+            binary_mode: true,
+            notification_url: notificationUrl,
+            metadata: { bookingId, providerId },
+        };
 
-        const preferenceResponse = await preferenceClient.create({
-            body: {
-                items: [{
-                    id: resolvedServiceId,
-                    title: serviceData.title || bookingData.serviceTitle || 'Servicio Profesional',
-                    quantity: 1,
-                    currency_id: 'CLP',
-                    unit_price: Number(amount),
-                }],
-                back_urls: backUrls,
-                auto_return: 'approved',
-                external_reference: bookingId,
-                binary_mode: true,
-                notification_url: notificationUrl,
-                metadata: { bookingId, providerId },
-                // No marketplace_fee / collector_id — custodial: 100% al marketplace.
-                // El 86.2% se transfiere al proveedor más tarde vía payout al cumplirse
-                // las condiciones (cliente aprueba o ventana de categoría vence).
-            }
-        });
+        let preferenceResponse;
+        let collectorType;
 
-        functions.logger.info(`[Payment] Preference created (custodial): preferenceId=${preferenceResponse.id}, providerId=${providerId}, providerCollectorId=${providerCollectorId || 'unlinked'}`);
+        if (canSplit) {
+            // ─── SPLIT MODEL (recommended) ───────────────────────────────────
+            // Crear preferencia con OAuth del proveedor + marketplace_fee.
+            // MP divide el dinero automáticamente al aprobarse el pago.
+            preferenceBody.marketplace_fee = marketplaceFee;
+            const providerMpClient = new MercadoPagoConfig({ accessToken: providerAccessToken });
+            const preferenceClient = new Preference(providerMpClient);
+            preferenceResponse = await preferenceClient.create({ body: preferenceBody });
+            collectorType = 'split';
+            functions.logger.info(`[Payment] Preference SPLIT created: preferenceId=${preferenceResponse.id}, providerId=${providerId}, collectorId=${providerCollectorId}, marketplaceFee=${marketplaceFee}`);
+        } else {
+            // ─── CUSTODIAL FALLBACK ──────────────────────────────────────────
+            // Sin OAuth → todo va al marketplace, manual payout después.
+            const preferenceClient = new Preference(mpClient);
+            preferenceResponse = await preferenceClient.create({ body: preferenceBody });
+            collectorType = 'marketplace_custodial';
+            functions.logger.info(`[Payment] Preference CUSTODIAL created: preferenceId=${preferenceResponse.id}, providerId=${providerId} (no OAuth)`);
+        }
 
         // 7. Update booking with preference info
         await db.collection('bookings').doc(bookingId).update({
             paymentPreferenceId: preferenceResponse.id,
             paymentStatus: 'pending',
-            collectorType: 'marketplace_custodial',
+            collectorType,
             providerMpCollectorId: providerCollectorId,
             servigoFee: marketplaceFee,
             providerPayout: Number(amount) - marketplaceFee,
@@ -153,7 +180,6 @@ exports.createPreference = functions.runWith({ maxInstances: 1, memory: '256MB',
 
         return { success: true, initPoint: preferenceResponse.init_point, preferenceId: preferenceResponse.id };
     } catch (error) {
-        // Preserve HttpsError codes so the frontend can distinguish PROVIDER_NOT_LINKED_MP_OAUTH
         if (error instanceof functions.https.HttpsError) {
             functions.logger.warn(`[Payment] createPreference HttpsError: ${error.code} — ${error.message}`);
             throw error;
@@ -580,13 +606,21 @@ exports.oauthMercadoPago = functions.runWith({ maxInstances: 1, memory: '128MB',
     });
 });
 /**
- * CAPA 4 - LIBERACIÓN DE FONDOS (MODELO CUSTODIAL)
+ * CAPA 4 - LIBERACIÓN DE FONDOS (MODELO HÍBRIDO SPLIT / CUSTODIAL)
  * Se activa cuando 'fundsReleased: true' (cliente aprueba o auto-release dispara).
  *
- * Flujo custodial: el dinero está en la cuenta MP del marketplace (ServiGo).
- * Al liberar NO se hace PUT contra MP — se deja la transacción encolada en
- * la colección `payouts` para que el admin ejecute la transferencia al
- * proveedor desde el dashboard MP (o vía un job de payouts masivos).
+ * Dos caminos:
+ *   ─ SPLIT (collectorType === 'split'): el pago vive en la cuenta del proveedor
+ *     con money_release_date retenido. Para liberarlo hacemos un PUT a
+ *     /v1/payments/{paymentId} con money_release_date=NOW usando el access_token
+ *     del PROVEEDOR (OAuth). MP libera automáticamente los fondos al proveedor
+ *     (ya descontado el marketplace_fee que fue a ServiGo al momento del pago).
+ *     Ésta es la única forma oficial de automatizar el payout.
+ *
+ *   ─ CUSTODIAL (collectorType === 'marketplace_custodial'): los fondos están
+ *     en la cuenta MP de ServiGo. No existe una API pública de MP para
+ *     transferir entre cuentas post-pago, así que encolamos el payout en la
+ *     colección `payouts` para ejecución manual desde el dashboard MP.
  */
 exports.releaseBookingFunds = functions.runWith({ maxInstances: 1, memory: '256MB', timeoutSeconds: 60 }).firestore
     .document('bookings/{bookingId}')
@@ -599,18 +633,21 @@ exports.releaseBookingFunds = functions.runWith({ maxInstances: 1, memory: '256M
 
         const bookingId = context.params.bookingId;
         const paymentId = after.paymentId;
+        const collectorType = after.collectorType || 'marketplace_custodial';
 
-        console.log(`[Payout] 🚀 Liberación custodial iniciada. Booking=${bookingId}, Payment=${paymentId}`);
+        console.log(`[Payout] 🚀 Liberación iniciada. Booking=${bookingId}, Payment=${paymentId}, Mode=${collectorType}`);
 
         try {
             const totalAmount = Number(after.totalPrice || after.price || 0);
             const fee = Number(after.servigoFee || Math.round(totalAmount * 0.10));
             const providerAmount = totalAmount - fee;
 
-            // Cargar datos del proveedor para el payout
+            // Cargar datos del proveedor
             let providerCollectorId = null;
             let providerEmail = null;
             let providerName = null;
+            let providerAccessToken = null;
+            let providerBankAccount = null;
             if (after.providerId) {
                 const providerDoc = await db.collection('users').doc(after.providerId).get();
                 if (providerDoc.exists) {
@@ -618,6 +655,20 @@ exports.releaseBookingFunds = functions.runWith({ maxInstances: 1, memory: '256M
                     providerCollectorId = pd.mpCollectorId || null;
                     providerEmail = pd.email || null;
                     providerName = pd.name || pd.displayName || null;
+                    providerAccessToken = pd.mpAccessToken || null;
+                    // Cuenta bancaria chilena (payout directo manual)
+                    if (pd.bankAccount && pd.bankAccount.accountNumber) {
+                        providerBankAccount = {
+                            bankCode: pd.bankAccount.bankCode || null,
+                            bankName: pd.bankAccount.bankName || null,
+                            accountType: pd.bankAccount.accountType || null,
+                            accountTypeName: pd.bankAccount.accountTypeName || null,
+                            accountNumber: pd.bankAccount.accountNumber,
+                            rut: pd.bankAccount.rut || null,
+                            holderName: pd.bankAccount.holderName || null,
+                            email: pd.bankAccount.email || null,
+                        };
+                    }
                 }
             }
 
@@ -631,85 +682,112 @@ exports.releaseBookingFunds = functions.runWith({ maxInstances: 1, memory: '256M
                 providerName,
                 providerEmail,
                 providerMpCollectorId: providerCollectorId,
+                providerBankAccount: providerBankAccount || null,
                 amount: providerAmount,
                 servigoFee: fee,
                 totalPrice: totalAmount,
                 currency: 'CLP',
                 status: 'processing',
                 reason: payoutReason,
+                mode: collectorType,
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
                 servicePaymentId: paymentId,
             });
 
-            // ── TRANSFERENCIA AUTOMÁTICA ──────────────────────────────────────
-            // Si el proveedor tiene cuenta MP vinculada, ejecutar la transferencia
-            // inmediatamente via MP Transfer API. Si no, encolar para revisión manual.
-            let payoutStatus = providerCollectorId ? 'queued_for_transfer' : 'awaiting_provider_mp_link';
-            let transferId = null;
-            let transferError = null;
-            const marketplaceToken = process.env.MERCADOPAGO_ACCESS_TOKEN;
+            let payoutStatus;
+            let releaseError = null;
+            let releaseDetail = null;
 
-            if (providerCollectorId && marketplaceToken) {
-                console.log(`[Payout] Intentando transferencia automática: $${providerAmount} CLP → MP ${providerCollectorId}`);
-                try {
-                    const transferResp = await fetch('https://api.mercadopago.com/v1/account/payment_methods/transfers', {
-                        method: 'POST',
-                        headers: {
-                            'Authorization': `Bearer ${marketplaceToken}`,
-                            'Content-Type': 'application/json',
-                            'X-Idempotency-Key': `payout-${bookingId}`,
-                        },
-                        body: JSON.stringify({
-                            amount: providerAmount,
-                            currency_id: 'CLP',
-                            destination: { collector_id: Number(providerCollectorId) },
-                            description: `ServiGo - Pago reserva ${bookingId}`,
-                        }),
-                    });
+            if (collectorType === 'split') {
+                // ── SPLIT: PUT money_release_date=NOW con el token del proveedor ──
+                if (!paymentId) {
+                    payoutStatus = 'error_missing_payment_id';
+                    releaseError = 'Falta paymentId en booking (split).';
+                    console.error(`[Payout] ❌ ${releaseError}`);
+                } else if (!providerAccessToken) {
+                    payoutStatus = 'error_missing_provider_token';
+                    releaseError = 'Proveedor sin mpAccessToken (OAuth) pese a collectorType=split.';
+                    console.error(`[Payout] ❌ ${releaseError}`);
+                } else {
+                    console.log(`[Payout] Liberando SPLIT: payment=${paymentId}, provider=${after.providerId}, monto neto provider≈$${providerAmount}`);
+                    try {
+                        const releaseResp = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+                            method: 'PUT',
+                            headers: {
+                                'Authorization': `Bearer ${providerAccessToken}`,
+                                'Content-Type': 'application/json',
+                                'X-Idempotency-Key': `release-${bookingId}`,
+                            },
+                            body: JSON.stringify({
+                                date_of_expiration: null,
+                                money_release_date: new Date().toISOString(),
+                            }),
+                        });
+                        const releaseData = await releaseResp.json();
 
-                    const transferData = await transferResp.json();
-
-                    if (transferResp.ok && transferData.id) {
-                        payoutStatus = 'transferred';
-                        transferId = String(transferData.id);
-                        console.log(`[Payout] ✅ Transferencia automática exitosa. TransferID=${transferId}`);
-                    } else {
-                        payoutStatus = 'transfer_failed_queued';
-                        transferError = transferData?.message || `HTTP ${transferResp.status}`;
-                        console.warn(`[Payout] ⚠️ Transferencia fallida (${transferError}). Encolado para revisión manual.`);
+                        if (releaseResp.ok && (releaseData.id || releaseData.status)) {
+                            payoutStatus = 'released';
+                            releaseDetail = releaseData.money_release_date || 'released';
+                            console.log(`[Payout] ✅ Split liberado. payment=${paymentId}, money_release_date=${releaseDetail}`);
+                        } else {
+                            payoutStatus = 'release_failed';
+                            releaseError = releaseData?.message || releaseData?.error || `HTTP ${releaseResp.status}`;
+                            console.warn(`[Payout] ⚠️ Release split falló: ${releaseError}`, releaseData);
+                        }
+                    } catch (splitErr) {
+                        payoutStatus = 'release_error';
+                        releaseError = splitErr.message;
+                        console.error(`[Payout] ❌ Error al liberar split: ${splitErr.message}`);
                     }
-                } catch (transferErr) {
-                    payoutStatus = 'transfer_error_queued';
-                    transferError = transferErr.message;
-                    console.error(`[Payout] ❌ Error en transferencia automática: ${transferErr.message}`);
                 }
+            } else {
+                // ── CUSTODIAL: no hay API pública para transferir. Se encola manual. ──
+                // Prioridad de payout manual:
+                //   1. MP Collector (transferencia interna vía dashboard MP)
+                //   2. Cuenta bancaria chilena (transferencia externa al banco)
+                //   3. Nada → awaiting_payout_method (provider no configuró ninguno)
+                if (providerCollectorId) {
+                    payoutStatus = 'queued_for_manual_payout';
+                } else if (providerBankAccount) {
+                    payoutStatus = 'queued_for_bank_payout';
+                } else {
+                    payoutStatus = 'awaiting_payout_method';
+                }
+                console.log(`[Payout] Custodial encolado (mode=${collectorType}): status=${payoutStatus}, collectorId=${providerCollectorId || 'NONE'}, bank=${providerBankAccount ? providerBankAccount.bankName : 'NONE'}`);
             }
-            // ─────────────────────────────────────────────────────────────────
 
-            // Actualizar doc de payout con el resultado de la transferencia
             await payoutRef.update({
                 status: payoutStatus,
-                ...(transferId ? { transferId, transferredAt: admin.firestore.FieldValue.serverTimestamp() } : {}),
-                ...(transferError ? { transferError } : {}),
+                ...(releaseError ? { error: releaseError } : {}),
+                ...(releaseDetail ? { releaseDetail } : {}),
+                ...(payoutStatus === 'released' ? { releasedAt: admin.firestore.FieldValue.serverTimestamp() } : {}),
             });
 
-            const releaseMessage = transferId
-                ? `💰 Transferencia automática ejecutada: $${providerAmount} CLP al proveedor (MP ${providerCollectorId}). TransferID: ${transferId}.`
-                : providerCollectorId
-                    ? `💰 Transferencia fallida (${transferError}). Payout encolado para revisión manual. MP ${providerCollectorId}.`
-                    : `💰 Payout encolado: $${providerAmount} CLP. El proveedor aún no vinculó MP — se transferirá cuando lo haga.`;
+            // Mensaje legible para el historial
+            let releaseMessage;
+            if (payoutStatus === 'released') {
+                releaseMessage = `💰 Fondos liberados automáticamente vía split: ~$${providerAmount} CLP al proveedor (descontando 10% ServiGo). Payment=${paymentId}.`;
+            } else if (payoutStatus === 'queued_for_manual_payout') {
+                releaseMessage = `💰 Payout encolado para ejecución manual: $${providerAmount} CLP al proveedor (MP ${providerCollectorId}). El admin debe procesarlo desde el dashboard MP.`;
+            } else if (payoutStatus === 'queued_for_bank_payout') {
+                releaseMessage = `💰 Payout encolado para transferencia bancaria: $${providerAmount} CLP a ${providerBankAccount.bankName} · ${providerBankAccount.accountTypeName} · ••••${String(providerBankAccount.accountNumber).slice(-4)} (${providerBankAccount.holderName}, ${formatRutServer(providerBankAccount.rut)}). El admin debe ejecutarla externamente.`;
+            } else if (payoutStatus === 'awaiting_payout_method') {
+                releaseMessage = `💰 Payout en espera: $${providerAmount} CLP. El proveedor aún no configuró método de cobro (MercadoPago o cuenta bancaria).`;
+            } else {
+                releaseMessage = `⚠️ Liberación no completada (${payoutStatus}): ${releaseError || 'ver logs'}.`;
+            }
 
             await change.after.ref.update({
                 payoutStatus,
                 payoutAmount: providerAmount,
                 payoutAt: admin.firestore.FieldValue.serverTimestamp(),
-                ...(transferId ? { payoutTransferId: transferId } : {}),
+                ...(releaseError ? { payoutError: releaseError } : {}),
                 statusHistory: admin.firestore.FieldValue.arrayUnion({
-                    status: transferId ? 'payout_transferred' : 'payout_queued',
+                    status: payoutStatus === 'released' ? 'payout_released' : 'payout_queued',
                     message: releaseMessage,
                     timestamp: admin.firestore.Timestamp.now(),
                     userRole: 'system',
-                    uid: 'custodial_payout_engine'
+                    uid: 'payout_engine'
                 })
             });
 
@@ -718,20 +796,27 @@ exports.releaseBookingFunds = functions.runWith({ maxInstances: 1, memory: '256M
                 const providerDoc = await db.collection('users').doc(after.providerId).get();
                 const pushToken = providerDoc.data()?.expoPushToken;
                 if (pushToken && Expo.isExpoPushToken(pushToken)) {
+                    const pushTitle = payoutStatus === 'released' ? '💰 Pago Liberado' : '💰 Pago en Camino';
+                    let pushBody;
+                    if (payoutStatus === 'released') {
+                        pushBody = `$${providerAmount} CLP ya están disponibles en tu cuenta MercadoPago.`;
+                    } else if (payoutStatus === 'queued_for_manual_payout') {
+                        pushBody = `El cliente aprobó tu trabajo. $${providerAmount} CLP serán transferidos a tu MercadoPago a la brevedad.`;
+                    } else if (payoutStatus === 'queued_for_bank_payout') {
+                        pushBody = `El cliente aprobó tu trabajo. $${providerAmount} CLP serán transferidos a tu cuenta ${providerBankAccount.bankName} a la brevedad.`;
+                    } else {
+                        pushBody = `El cliente aprobó tu trabajo. Configura MercadoPago o una cuenta bancaria en tu perfil para recibir $${providerAmount} CLP.`;
+                    }
                     await expo.sendPushNotificationsAsync([{
                         to: pushToken,
-                        title: transferId ? '💰 Pago Transferido' : '💰 Pago Liberado',
-                        body: transferId
-                            ? `$${providerAmount} CLP han sido transferidos a tu cuenta MercadoPago.`
-                            : providerCollectorId
-                                ? `El cliente aprobó tu trabajo. $${providerAmount} CLP serán transferidos a la brevedad.`
-                                : `El cliente aprobó tu trabajo. Vincula MercadoPago en tu perfil para recibir $${providerAmount} CLP.`,
+                        title: pushTitle,
+                        body: pushBody,
                         data: { bookingId, type: 'payout' }
                     }]);
                 }
             }
 
-            console.log(`[Payout] ✅ Procesado. Booking=${bookingId}, amount=${providerAmount}, status=${payoutStatus}${transferId ? `, transferId=${transferId}` : ''}`);
+            console.log(`[Payout] ✅ Procesado. Booking=${bookingId}, amount=${providerAmount}, status=${payoutStatus}`);
 
         } catch (error) {
             console.error(`[Payout] ❌ ERROR:`, error);
@@ -740,7 +825,7 @@ exports.releaseBookingFunds = functions.runWith({ maxInstances: 1, memory: '256M
                 payoutError: error.message,
                 statusHistory: admin.firestore.FieldValue.arrayUnion({
                     status: 'payout_error',
-                    message: `❌ Error al encolar payout: ${error.message}`,
+                    message: `❌ Error al liberar payout: ${error.message}`,
                     timestamp: admin.firestore.Timestamp.now(),
                     userRole: 'system'
                 })
